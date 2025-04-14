@@ -1,3 +1,11 @@
+terraform {
+  required_providers {
+    terraform = {
+      source  = "builtin/terraform"
+      version = ""
+    }
+  }
+}
 ##
 # (c) 2024 - Cloud Ops Works LLC - https://cloudops.works/
 #            On GitHub: https://github.com/cloudopsworks
@@ -8,6 +16,25 @@ locals {
   multi_user          = try(var.settings.multi_user, false)
   function_name       = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
   function_name_short = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
+  pip_map = {
+    postgres = "psycopg"
+    mysql    = "PyMySQL"
+    mariadb  = "PyMySQL"
+    mssql    = "pymssql"
+    mongodb  = "pymongo"
+    oracle   = "python-oracledb"
+    db2      = "python-ibmdb"
+  }
+}
+
+resource "terraform_data" "function_pip" {
+  triggers_replace = {
+    always_run = tostring(timestamp())
+  }
+  provisioner "local-exec" {
+    working_dir = path.module
+    command     = "pip3 install --platform manylinux1_x86_64 --target ${path.module}/lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"} --python-version 3.12 --implementation cp --only-binary=:all: --upgrade ${local.pip_map[var.settings.type]} "
+  }
 }
 
 data "archive_file" "rotate_code" {
