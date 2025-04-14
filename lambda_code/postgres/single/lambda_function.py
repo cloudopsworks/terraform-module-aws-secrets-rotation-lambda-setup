@@ -281,9 +281,24 @@ def get_connection(secret_dict):
         return conn
     except psycopg.Error as e:
         # Print logger.error the psycopg.Error
-        logger.error("Unable to connect to database with secret dictionary %s, Error is: %s %s" % (secret_dict, e.__class__, e))
+        logger.error("Unable to connect to database with secret dictionary %s, Error is: %s %s" % (redact_secret_dict(secret_dict), e.__class__, e))
         return None
 
+def redact_secret_dict(secret_dict):
+    """Redacts the secret dictionary
+
+    This helper function redacts the password in the secret dictionary
+
+    Args:
+        secret_dict (dict): The Secret Dictionary
+
+    Returns:
+        dict: The redacted secret dictionary
+
+    """
+    # Redact the password
+    secret_dict['password'] = "REDACTED"
+    return secret_dict
 
 def get_secret_dict(service_client, arn, stage, token=None):
     """Gets the secret dictionary corresponding for the secret arn, stage, and token
@@ -365,7 +380,7 @@ def get_random_password(service_client):
         string: The randomly generated password.
     """
     passwd = service_client.get_random_password(
-        ExcludeCharacters=os.environ.get('EXCLUDE_CHARACTERS', ':/@"\'\\'),
+        ExcludeCharacters=os.environ.get('EXCLUDE_CHARACTERS', ':/@"\'\\$#&*()[]{}<>'),
         PasswordLength=int(os.environ.get('PASSWORD_LENGTH', 32)),
         ExcludeNumbers=get_environment_bool('EXCLUDE_NUMBERS', False),
         ExcludePunctuation=get_environment_bool('EXCLUDE_PUNCTUATION', False),
