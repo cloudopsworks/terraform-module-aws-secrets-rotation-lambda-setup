@@ -37,7 +37,7 @@ resource "aws_lambda_function" "this" {
   }
   environment {
     variables = {
-      for item in var.settings.environment.variables :
+      for item in try(var.settings.environment.variables, []) :
       item.name => item.value
     }
   }
