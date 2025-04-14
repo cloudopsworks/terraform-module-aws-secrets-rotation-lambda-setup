@@ -265,6 +265,7 @@ def get_connection(secret_dict):
     # Parse and validate the secret JSON string
     port = int(secret_dict['port']) if 'port' in secret_dict else 5432
     dbname = secret_dict['dbname'] if 'dbname' in secret_dict else "postgres"
+    sslmode = secret_dict['sslmode'] if 'sslmode' in secret_dict else "prefer"
 
     # Try to obtain a connection to the db
     try:
@@ -272,9 +273,10 @@ def get_connection(secret_dict):
             host=secret_dict['host'],
             user=secret_dict['username'],
             password=secret_dict['password'],
-            database=dbname,
+            dbname=dbname,
             port=port,
             connect_timeout=5
+            sslmode=sslmode
         )
         return conn
     except psycopg.Error as e:
