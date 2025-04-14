@@ -279,8 +279,7 @@ def get_connection(secret_dict):
         return conn
     except psycopg.Error as e:
         # Print logger.error the psycopg.Error
-        logger.error("Unable to connect to database with secret dictionary %s, Error is: %s" % (secret_dict, e.pgerror))
-        logger.error("Diagnostics: %s" % e.diag.message_detail)
+        logger.error("Unable to connect to database with secret dictionary %s, Error is: %s %s" % (secret_dict, e.__class__, e))
         return None
 
 
