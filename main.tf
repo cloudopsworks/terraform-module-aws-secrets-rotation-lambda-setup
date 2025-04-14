@@ -28,10 +28,10 @@ resource "aws_lambda_function" "this" {
   timeout          = try(var.settings.timeout, 60)
   publish          = true
   dynamic "vpc_config" {
-    for_each = try(var.settings.vpc.enabled, false) ? [1] : []
+    for_each = try(var.vpc.enabled, false) ? [1] : []
     content {
-      security_group_ids = try(var.settings.vpc.create_security_group, false) ? [aws_security_group.this[0].id] : var.settings.vpc.security_groups
-      subnet_ids         = var.settings.vpc.subnets
+      security_group_ids = try(var.vpc.create_security_group, false) ? [aws_security_group.this[0].id] : var.vpc.security_groups
+      subnet_ids         = var.vpc.subnets
     }
   }
   environment {

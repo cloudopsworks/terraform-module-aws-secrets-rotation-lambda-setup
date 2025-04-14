@@ -3,4 +3,26 @@
 #            On GitHub: https://github.com/cloudopsworks
 #            Distributed Under Apache v2.0 License
 #
+output "lambda_name" {
+  value = aws_lambda_function.this.function_name
+}
 
+output "lambda_arn" {
+  value = aws_lambda_function.this.arn
+}
+
+output "lambda_exec_role" {
+  value = aws_iam_role.default_lambda_function.name
+}
+
+output "lambda_exec_role_arn" {
+  value = aws_iam_role.default_lambda_function.arn
+}
+
+output "lambda_cloudwatch_log" {
+  value = aws_cloudwatch_log_group.logs.name
+}
+
+output "lambda_cloudwatch_log_arn" {
+  value = aws_cloudwatch_log_group.logs.arn
+}

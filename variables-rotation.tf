@@ -15,3 +15,9 @@ variable "settings" {
   type        = any
   default     = {}
 }
+
+variable "vpc" {
+  description = "VPC settings for the module"
+  type        = any
+  default     = {}
+}

@@ -5,12 +5,12 @@
 #
 
 data "aws_subnet" "lambda_sub" {
-  count = try(var.settings.vpc.enabled, false) ? length(var.settings.vpc.subnets) : 0
-  id    = var.settings.vpc.subnets[count.index]
+  count = try(var.vpc.enabled, false) ? length(var.vpc.subnets) : 0
+  id    = var.vpc.subnets[count.index]
 }
 
 resource "aws_security_group" "this" {
-  count  = try(var.settings.vpc.create_security_group, false) && try(var.settings.vpc.enabled, false) ? 1 : 0
+  count  = try(var.vpc.create_security_group, false) && try(var.vpc.enabled, false) ? 1 : 0
   name   = "${local.function_name}-sg"
   vpc_id = data.aws_subnet.lambda_sub[0].vpc_id
   egress {

@@ -63,7 +63,7 @@ resource "aws_iam_role_policy" "lambda_function_logs" {
 
 
 data "aws_iam_policy_document" "vpc_ec2" {
-  count   = try(var.settings.vpc.enabled, false) ? 1 : 0
+  count   = try(var.vpc.enabled, false) ? 1 : 0
   version = "2012-10-17"
   statement {
     effect = "Allow"
@@ -80,7 +80,7 @@ data "aws_iam_policy_document" "vpc_ec2" {
 }
 
 resource "aws_iam_role_policy" "vpc_ec2" {
-  count  = try(var.settings.vpc.enabled, false) ? 1 : 0
+  count  = try(var.vpc.enabled, false) ? 1 : 0
   name   = "${local.function_name}-vpc-policy"
   role   = aws_iam_role.default_lambda_function.name
   policy = data.aws_iam_policy_document.vpc_ec2[0].json
