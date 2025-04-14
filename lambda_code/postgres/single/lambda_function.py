@@ -275,7 +275,7 @@ def get_connection(secret_dict):
             password=secret_dict['password'],
             dbname=dbname,
             port=port,
-            connect_timeout=5
+            connect_timeout=5,
             sslmode=sslmode
         )
         return conn
