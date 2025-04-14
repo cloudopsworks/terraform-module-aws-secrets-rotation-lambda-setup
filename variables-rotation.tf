@@ -6,9 +6,7 @@
 
 ## YAML Specification Settings
 # settings:
-#   name: <name>
-#   name_prefix: <name_prefix>
-#   type: mongodb | postgres(ql) | mysql | mariadb | mssql | mongodbatlas
+#   type: mongodb | postgres | mysql | mariadb | mssql | mongodbatlas
 #   multi_user: true | false # Defaults to false
 variable "settings" {
   description = "Settings for the module"

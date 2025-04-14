@@ -5,8 +5,8 @@
 #
 
 locals {
-  function_name = try(var.settings.name, "") != "" ? var.settings.name : "${var.settings.name_prefix}-${var.settings.type}-${local.system_name}"
   multi_user    = try(var.settings.multi_user, false)
+  function_name = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
 }
 
 data "archive_file" "rotate_code" {
