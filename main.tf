@@ -9,7 +9,7 @@ locals {
   function_name       = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
   function_name_short = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
   pip_map = {
-    postgres = "psycopg typing_extensions"
+    postgres = "\"psycopg[binary]\" typing_extensions"
     mysql    = "PyMySQL"
     mariadb  = "PyMySQL"
     mssql    = "pymssql"
@@ -25,7 +25,7 @@ resource "terraform_data" "function_pip" {
   }
   provisioner "local-exec" {
     working_dir = path.module
-    command     = "pip3 install --platform manylinux1_x86_64 --target ${path.module}/lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"} --python-version 3.12 --implementation cp --only-binary=:all: --upgrade ${local.pip_map[var.settings.type]} "
+    command     = "pip3 install --platform manylinux2014_x86_64 --target ${path.module}/lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"} --python-version 3.12 --implementation cp --only-binary=:all: --upgrade ${local.pip_map[var.settings.type]} "
   }
 }
 
