@@ -17,6 +17,13 @@ locals {
     oracle   = "python-oracledb"
     db2      = "python-ibmdb"
   }
+  variables = concat(try(var.settings.environment.variables, []),
+  [
+    {
+      name = "SECRETS_MANAGER_ENDPOINT"
+      value = "https://secretsmanager.${data.aws_region.current.name}.amazonaws.com"
+    }
+  ])
 }
 
 resource "terraform_data" "function_pip" {
@@ -57,7 +64,7 @@ resource "aws_lambda_function" "this" {
   }
   environment {
     variables = {
-      for item in try(var.settings.environment.variables, []) :
+      for item in local.variables :
       item.name => item.value
     }
   }
