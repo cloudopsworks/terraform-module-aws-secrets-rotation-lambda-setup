@@ -18,11 +18,11 @@ locals {
     db2      = "python-ibmdb"
   }
   variables = concat(try(var.settings.environment.variables, []),
-  [
-    {
-      name = "SECRETS_MANAGER_ENDPOINT"
-      value = "https://secretsmanager.${data.aws_region.current.name}.amazonaws.com"
-    }
+    [
+      {
+        name  = "SECRETS_MANAGER_ENDPOINT"
+        value = "https://secretsmanager.${data.aws_region.current.name}.amazonaws.com"
+      }
   ])
 }
 
@@ -37,7 +37,7 @@ resource "terraform_data" "function_pip" {
 }
 
 data "archive_file" "rotate_code" {
-  depends_on = [terraform_data.function_pip]
+  depends_on  = [terraform_data.function_pip]
   type        = "zip"
   source_dir  = "${path.module}/lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
   output_path = "${path.module}/lambda_rotation.zip"
