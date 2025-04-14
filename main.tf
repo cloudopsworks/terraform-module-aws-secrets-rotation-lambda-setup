@@ -9,7 +9,7 @@ locals {
   function_name       = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
   function_name_short = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
   pip_map = {
-    postgres = "psycopg"
+    postgres = "psycopg typing_extensions"
     mysql    = "PyMySQL"
     mariadb  = "PyMySQL"
     mssql    = "pymssql"
