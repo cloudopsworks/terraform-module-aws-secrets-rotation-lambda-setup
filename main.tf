@@ -1,11 +1,3 @@
-terraform {
-  required_providers {
-    terraform = {
-      source  = "builtin/terraform"
-      version = ""
-    }
-  }
-}
 ##
 # (c) 2024 - Cloud Ops Works LLC - https://cloudops.works/
 #            On GitHub: https://github.com/cloudopsworks
