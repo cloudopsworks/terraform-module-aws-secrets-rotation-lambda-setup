@@ -86,6 +86,36 @@ resource "aws_iam_role_policy" "vpc_ec2" {
   policy = data.aws_iam_policy_document.vpc_ec2[0].json
 }
 
+data "aws_iam_policy_document" "allowed_secrets" {
+  count = length(try(var.settings.allowed_secrets, [])) > 0 ? 1 : 0
+  statement {
+    sid    = "ReadListSecrets"
+    effect = "Allow"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:ListSecretVersionIds",
+    ]
+    resources = var.settings.allowed_secrets
+  }
+  statement {
+    sid    = "WriteUpdateSecrets"
+    effect = "Allow"
+    actions = [
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:UpdateSecretVersionStage",
+    ]
+    resources = var.settings.allowed_secrets
+  }
+}
+
+resource "aws_iam_role_policy" "allowed_secrets" {
+  count  = length(try(var.settings.allowed_secrets, [])) > 0 ? 1 : 0
+  name   = "${local.function_name_short}-allow-secret-policy"
+  role   = aws_iam_role.default_lambda_function.name
+  policy = data.aws_iam_policy_document.allowed_secrets[0].json
+}
+
 data "aws_iam_policy_document" "custom" {
   count = length(try(var.settings.iam.statements, [])) > 0 ? 1 : 0
   dynamic "statement" {
