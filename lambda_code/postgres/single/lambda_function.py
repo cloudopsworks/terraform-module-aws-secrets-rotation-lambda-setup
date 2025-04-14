@@ -277,7 +277,10 @@ def get_connection(secret_dict):
             connect_timeout=5
         )
         return conn
-    except psycopg.Error:
+    except psycopg.Error as e:
+        # Print logger.error the psycopg.Error
+        logger.error("Unable to connect to database with secret dictionary %s, Error is: %s" % (secret_dict, e.pgerror))
+        logger.error("Diagnostics: %s" % e.diag.message_detail)
         return None
 
 
