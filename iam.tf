@@ -89,23 +89,24 @@ resource "aws_iam_role_policy" "vpc_ec2" {
 data "aws_iam_policy_document" "allowed_secrets" {
   count = length(try(var.settings.allowed_secrets, [])) > 0 ? 1 : 0
   statement {
-    sid    = "ReadListSecrets"
+    sid    = "ReadListUpdateSecrets"
     effect = "Allow"
     actions = [
-      "secretsmanager:GetSecretValue",
       "secretsmanager:DescribeSecret",
-      "secretsmanager:ListSecretVersionIds",
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:UpdateSecretVersionStage"
     ]
     resources = var.settings.allowed_secrets
   }
   statement {
-    sid    = "WriteUpdateSecrets"
+    sid    = "RandomPassword"
     effect = "Allow"
     actions = [
-      "secretsmanager:PutSecretValue",
+      "secretsmanager:GetRandomPassword",
       "secretsmanager:UpdateSecretVersionStage",
     ]
-    resources = var.settings.allowed_secrets
+    resources = ["*"]
   }
 }
 
@@ -114,6 +115,32 @@ resource "aws_iam_role_policy" "allowed_secrets" {
   name   = "${local.function_name_short}-allow-secret-policy"
   role   = aws_iam_role.default_lambda_function.name
   policy = data.aws_iam_policy_document.allowed_secrets[0].json
+}
+
+data "aws_iam_policy_document" "allowed_kms" {
+  count = length(try(var.settings.allowed_kms, [])) > 0 ? 1 : 0
+  statement {
+    sid    = "KMS"
+    effect = "Allow"
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:GenerateDataKey"
+    ]
+    resources = var.settings.allowed_kms
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:SecretARN"
+      values   = var.settings.allowed_secrets
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "allowed_kms" {
+  count  = length(try(var.settings.allowed_kms, [])) > 0 ? 1 : 0
+  name   = "${local.function_name_short}-allow-kms-policy"
+  role   = aws_iam_role.default_lambda_function.name
+  policy = data.aws_iam_policy_document.allowed_kms[0].json
 }
 
 data "aws_iam_policy_document" "custom" {
