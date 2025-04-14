@@ -256,7 +256,7 @@ def get_connection(secret_dict):
         secret_dict (dict): The Secret Dictionary
 
     Returns:
-        Connection: The psycopg2 object if successful. None otherwise
+        Connection: The psycopg object if successful. None otherwise
 
     Raises:
         KeyError: If the secret json does not contain the expected keys
@@ -268,7 +268,7 @@ def get_connection(secret_dict):
 
     # Try to obtain a connection to the db
     try:
-        conn = psycopg2.connect(
+        conn = psycopg.connect(
             host=secret_dict['host'],
             user=secret_dict['username'],
             password=secret_dict['password'],
@@ -277,7 +277,7 @@ def get_connection(secret_dict):
             connect_timeout=5
         )
         return conn
-    except psycopg2.Error:
+    except psycopg.Error:
         return None
 
 
