@@ -315,9 +315,9 @@ def get_secret_dict(service_client, arn, stage, token=None):
     secret_dict = json.loads(plaintext)
 
     # Run validations against the secret
-    supported_engines = ["postgres", "aurora-postgresql"]
+    supported_engines = ["postgres", "aurora-postgresql", "postgresql"]
     if 'engine' not in secret_dict or secret_dict['engine'] not in supported_engines:
-        raise KeyError("Database engine must be set to 'postgres' in order to use this rotation lambda")
+        raise KeyError("Database engine must be set to 'postgres,postgresql or aurora-postgresql' in order to use this rotation lambda")
     for field in required_fields:
         if field not in secret_dict:
             raise KeyError("%s key is missing from secret JSON" % field)
