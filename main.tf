@@ -20,7 +20,7 @@ resource "aws_lambda_function" "this" {
   function_name    = local.function_name
   description      = try(var.settings.description, "Secret Rotation Lambda - ${var.settings.type} - MultiUser: ${local.multi_user == true ? "Yes" : "No"}")
   role             = aws_iam_role.default_lambda_function.arn
-  handler          = "rotation_function.lambda_handler"
+  handler          = "lambda_function.lambda_handler"
   runtime          = "python3.12"
   package_type     = "Zip"
   filename         = data.archive_file.rotate_code.output_path
