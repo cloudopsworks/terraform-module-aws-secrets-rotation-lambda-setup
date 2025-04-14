@@ -5,8 +5,8 @@
 #
 
 locals {
-  multi_user    = try(var.settings.multi_user, false)
-  function_name = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
+  multi_user          = try(var.settings.multi_user, false)
+  function_name       = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
   function_name_short = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
 }
 
@@ -18,7 +18,7 @@ data "archive_file" "rotate_code" {
 
 resource "aws_lambda_function" "this" {
   function_name    = local.function_name
-  description      = try(var.settings.description, "Secret Rotation Lambda - ${try(var.settings.name, "") != "" ? var.settings.name : var.settings.name_prefix} - ${var.settings.type} - MultiUser: ${local.multi_user}")
+  description      = try(var.settings.description, "Secret Rotation Lambda - ${var.settings.type} - MultiUser: ${local.multi_user == true ? "Yes" : "No"}")
   role             = aws_iam_role.default_lambda_function.arn
   handler          = "rotation_function.lambda_handler"
   runtime          = "python3.12"
