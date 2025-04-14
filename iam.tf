@@ -21,7 +21,7 @@ data "aws_iam_policy_document" "assume_role" {
 }
 
 resource "aws_iam_role" "default_lambda_function" {
-  name               = "${local.function_name}-default-role"
+  name               = "${local.function_name_short}-role"
   assume_role_policy = data.aws_iam_policy_document.assume_role.json
   tags               = local.all_tags
   lifecycle {
@@ -56,7 +56,7 @@ data "aws_iam_policy_document" "lambda_function_logs" {
 
 
 resource "aws_iam_role_policy" "lambda_function_logs" {
-  name   = "${local.function_name}-logs-policy"
+  name   = "${local.function_name_short}-logs-policy"
   role   = aws_iam_role.default_lambda_function.name
   policy = data.aws_iam_policy_document.lambda_function_logs.json
 }
@@ -81,7 +81,7 @@ data "aws_iam_policy_document" "vpc_ec2" {
 
 resource "aws_iam_role_policy" "vpc_ec2" {
   count  = try(var.vpc.enabled, false) ? 1 : 0
-  name   = "${local.function_name}-vpc-policy"
+  name   = "${local.function_name_short}-vpc-policy"
   role   = aws_iam_role.default_lambda_function.name
   policy = data.aws_iam_policy_document.vpc_ec2[0].json
 }
@@ -100,7 +100,7 @@ data "aws_iam_policy_document" "custom" {
 
 resource "aws_iam_role_policy" "custom" {
   count  = length(try(var.settings.iam.statements, [])) > 0 ? 1 : 0
-  name   = "${local.function_name}-custom-policy"
+  name   = "${local.function_name_short}-custom-policy"
   role   = aws_iam_role.default_lambda_function.name
   policy = data.aws_iam_policy_document.custom[0].json
 }
