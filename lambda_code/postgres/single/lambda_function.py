@@ -288,6 +288,7 @@ def redact_secret_dict(secret_dict):
     """Redacts the secret dictionary
 
     This helper function redacts the password in the secret dictionary
+    but without modifying the original dictionary. This is useful for logging.
 
     Args:
         secret_dict (dict): The Secret Dictionary
@@ -297,8 +298,9 @@ def redact_secret_dict(secret_dict):
 
     """
     # Redact the password
-    secret_dict['password'] = "REDACTED"
-    return secret_dict
+    secret_dict_cp = secret_dict.copy()  # Create a copy to avoid modifying the original
+    secret_dict_cp['password'] = "REDACTED"
+    return secret_dict_cp
 
 def get_secret_dict(service_client, arn, stage, token=None):
     """Gets the secret dictionary corresponding for the secret arn, stage, and token
