@@ -1,7 +1,10 @@
 ##
-# (c) 2024 - Cloud Ops Works LLC - https://cloudops.works/
-#            On GitHub: https://github.com/cloudopsworks
-#            Distributed Under Apache v2.0 License
+# (c) 2021-2025
+#     Cloud Ops Works LLC - https://cloudops.works/
+#     Find us on:
+#       GitHub: https://github.com/cloudopsworks
+#       WebSite: https://cloudops.works
+#     Distributed Under Apache v2.0 License
 #
 
 locals {
@@ -22,8 +25,14 @@ locals {
       {
         name  = "SECRETS_MANAGER_ENDPOINT"
         value = "https://secretsmanager.${data.aws_region.current.name}.amazonaws.com"
-      }
-  ])
+      },
+    ],
+    try(var.settings.password_length, 32) > 24 ? [
+      {
+        name  = "PASSWORD_LENGTH"
+        valew = tostring(var.settings.password_length)
+    }] : []
+  )
   source_root = "lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
   source_dir  = "${path.module}/${local.source_root}"
 }

@@ -11,20 +11,101 @@ copyrights:
 github_repo: cloudopsworks/terraform-module-aws-vpc-setup
 
 description: |-
-  VPC Module for setting up transit gateway with ResourceAccessMananger support.
+  AWS Lambda Secrets Rotation Module for managing automated credential rotation for various database types including MongoDB, PostgreSQL, MySQL, MariaDB, MSSQL, MongoDB Atlas, Oracle and DB2. Supports both single-user and multi-user rotation strategies with VPC connectivity options.
 
 # Introduction to the project
-#introduction: |-
-#  This is an introduction.
+introduction: |-
+  This module creates and manages AWS Lambda functions for automated secret rotation in AWS Secrets Manager. It supports multiple database types and can be configured for both single-user and multi-user rotation strategies. The module includes automatic dependency management for database-specific Python packages and comprehensive logging configuration.
 
 # How to use this project
-#usage: |-
+usage: |-
+  Configure the module using the following YAML structure in your Terraform variables:
+
+  settings:
+    description: "Database Secrets Rotation Lambda"  # Optional description
+    type: postgres|mysql|mariadb|mssql|mongodb|oracle|db2  # Required database type
+    multi_user: true|false  # Optional, defaults to false
+    timeout: 30  # Optional, defaults to 60 seconds
+    memory_size: 128  # Optional, defaults to 128 MB
+    password_length: 30  # Optional, defaults to 30 (must be >24)
+    logging:  # Optional logging configuration
+      log_format: JSON|TEXT  # Defaults to JSON
+      application_log_level: INFO|DEBUG|ERROR
+      system_log_level: INFO|DEBUG|ERROR
+    environment:
+      variables:  # Optional additional environment variables
+        - name: CUSTOM_VAR
+          value: custom_value
+
+  vpc:  # Optional VPC configuration
+    enabled: true|false
+    subnets:  # Required if vpc enabled
+      - subnet-id1
+      - subnet-id2
+    create_security_group: true|false
+    security_groups:  # Required if create_security_group is false
+      - sg-12345678
 
 # Example usage
-#examples: |-
+examples: |-
+  # Terragrunt configuration example (terragrunt.hcl):
+  ```hcl
+  include "root" {
+    path = find_in_parent_folders()
+  }
+
+  terraform {
+    source = "git::https://github.com/cloudopsworks/terraform-aws-secrets-rotation.git?ref=v1.0.0"
+  }
+
+  inputs = {
+    settings = {
+      type = "postgres"
+      multi_user = true
+      description = "PostgreSQL Secrets Rotation"
+      memory_size = 256
+      timeout = 120
+      password_length = 32
+      logging = {
+        log_format = "JSON"
+        application_log_level = "INFO"
+      }
+    }
+
+    vpc = {
+      enabled = true
+      subnets = ["subnet-abc123", "subnet-def456"]
+      create_security_group = true
+    }
+  }
+  ```
 
 # How to get started quickly
-#quickstart: |-
+quickstart: |-
+  1. Add the module to your Terraform configuration:
+     ```hcl
+     module "secrets_rotation" {
+       source = "cloudopsworks/secrets-rotation/aws"
+       version = "1.0.0"
+
+       settings = {
+         type = "postgres"
+         multi_user = false
+       }
+     }
+     ```
+
+  2. Initialize Terraform:
+     ```bash
+     terraform init
+     ```
+
+  3. Apply the configuration:
+     ```bash
+     terraform apply
+     ```
+
+  4. The Lambda function will be created and ready to use with AWS Secrets Manager rotation.
 
 include:
   - "docs/targets.md"

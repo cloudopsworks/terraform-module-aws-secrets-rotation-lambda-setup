@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pymysql
+import urllib.parse
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -460,7 +461,7 @@ def get_random_password(service_client):
         string: The randomly generated password.
     """
     passwd = service_client.get_random_password(
-        ExcludeCharacters=os.environ.get('EXCLUDE_CHARACTERS', '/@"\'\\'),
+        ExcludeCharacters=os.environ.get('EXCLUDE_CHARACTERS', ':/"\'\\$%&*()[]{}<>?!.,;|'),
         PasswordLength=int(os.environ.get('PASSWORD_LENGTH', 32)),
         ExcludeNumbers=get_environment_bool('EXCLUDE_NUMBERS', False),
         ExcludePunctuation=get_environment_bool('EXCLUDE_PUNCTUATION', False),
@@ -493,16 +494,17 @@ def generate_connection_string(secret_dict, new_password):
     # Precondition: Ensure the secret_dict contains the necessary keys
     connection_string_type = secret_dict.get('connection_string_type')
     logger.info("Generating connection string for secret: %s" % connection_string_type)
+    encoded_password = urllib.parse.quote_plus(new_password)
     if connection_string_type == 'jdbc':
-        conn_string = f"jdbc:postgresql://{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?user={secret_dict['username']}&password={new_password}ssl=true&sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
+        conn_string = f"jdbc:postgresql://{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?user={secret_dict['username']}&password={encoded_password}ssl=true&sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
     elif connection_string_type == 'dotnet':
-        conn_string = f"Host={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};Username={secret_dict['username']};Password={new_password};SSL Mode={secret_dict.get('sslmode')};Search Path={secret_dict.get('schema', 'public')};"
+        conn_string = f"Host={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};Username={secret_dict['username']};Password={encoded_password};SSL Mode={secret_dict.get('sslmode')};Search Path={secret_dict.get('schema', 'public')};"
     elif connection_string_type == 'odbc':
-        conn_string = f"Driver={{PostgreSQL ODBC Driver(UNICODE)}};Server={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};UID={secret_dict['username']};PWD={new_password};sslmode={secret_dict.get('sslmode')};schema={secret_dict.get('schema', 'public')}"
+        conn_string = f"Driver={{PostgreSQL ODBC Driver(UNICODE)}};Server={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};UID={secret_dict['username']};PWD={encoded_password};sslmode={secret_dict.get('sslmode')};schema={secret_dict.get('schema', 'public')}"
     elif connection_string_type == 'gopq':
-        conn_string = f"postgres://{secret_dict['username']}:{new_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
+        conn_string = f"postgres://{secret_dict['username']}:{encoded_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
     elif connection_string_type == 'node-pg' or connection_string_type == 'psycopg' or connection_string_type == 'rustpg':
-        conn_string = f"postgressql://{secret_dict['username']}:{new_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
+        conn_string = f"postgressql://{secret_dict['username']}:{encoded_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
     else:
         conn_string = "(connection string type not supported)"
         logger.warning("Connection string type not supported! Supported types are: node-pg, psycopg, rustpg, jdbc, odbc, dotnet, gopq.")
