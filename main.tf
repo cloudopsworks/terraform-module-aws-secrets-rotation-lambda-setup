@@ -24,7 +24,8 @@ locals {
         value = "https://secretsmanager.${data.aws_region.current.name}.amazonaws.com"
       }
   ])
-  source_dir = "${path.module}/lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
+  source_root = "lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
+  source_dir  = "${path.module}/${local.source_root}"
 }
 
 resource "terraform_data" "function_pip" {
@@ -32,7 +33,7 @@ resource "terraform_data" "function_pip" {
     always_run = tostring(timestamp())
   }
   input = sha256(join("", [
-    for item in fileset(local.source_dir, "**/*") : filesha256(item)
+    for item in fileset(path.module, "${local.source_root}/**/*") : filesha256(item)
   ]))
   provisioner "local-exec" {
     working_dir = path.module
@@ -47,7 +48,7 @@ resource "archive_file" "rotate_code" {
   output_path = "${path.module}/lambda_rotation.zip"
   lifecycle {
     replace_triggered_by = [
-      terraform_data.function_pip
+      terraform_data.function_pip.output
     ]
   }
 }
