@@ -14,17 +14,17 @@ description: |-
   VPC Module for setting up transit gateway with ResourceAccessMananger support.
 
 # Introduction to the project
-#introduction: |-
+introduction: |-
 #  This is an introduction.
 
 # How to use this project
-#usage: |-
+usage: |-
 
 # Example usage
-#examples: |-
+examples: |-
 
 # How to get started quickly
-#quickstart: |-
+quickstart: |-
 
 include:
   - "docs/targets.md"
