@@ -1,4 +1,4 @@
-name: Terraform Transit Gateway Module
+name: Terraform AWS Lambda Secrets Rotation Module
 #logo: logo/logo.jpg
 
 license: "APACHE2"
@@ -8,7 +8,7 @@ copyrights:
     url: "https://cloudops.works"
     year: "2024"
 
-github_repo: cloudopsworks/terraform-module-aws-vpc-setup
+github_repo: cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup
 
 description: |-
   AWS Lambda Secrets Rotation Module for managing automated credential rotation for various database types including MongoDB, PostgreSQL, MySQL, MariaDB, MSSQL, MongoDB Atlas, Oracle and DB2. Supports both single-user and multi-user rotation strategies with VPC connectivity options.
@@ -21,6 +21,7 @@ introduction: |-
 usage: |-
   Configure the module using the following YAML structure in your Terraform variables:
 
+  ```yaml
   settings:
     description: "Database Secrets Rotation Lambda"  # Optional description
     type: postgres|mysql|mariadb|mssql|mongodb|oracle|db2  # Required database type
@@ -45,6 +46,7 @@ usage: |-
     create_security_group: true|false
     security_groups:  # Required if create_security_group is false
       - sg-12345678
+  ```
 
 # Example usage
 examples: |-
