@@ -27,10 +27,10 @@ locals {
         value = "https://secretsmanager.${data.aws_region.current.name}.amazonaws.com"
       },
     ],
-    try(var.settings.password_length, 32) > 24 ? [
+    try(var.settings.password_length, -1) >= 24 ? [
       {
         name  = "PASSWORD_LENGTH"
-        valew = tostring(var.settings.password_length)
+        value = tostring(var.settings.password_length)
     }] : []
   )
   source_root = "lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
