@@ -423,11 +423,11 @@ def generate_connection_string(secret_dict, new_password):
     logger.info("Generating connection string for secret: %s" % connection_string_type)
     encoded_password = urllib.parse.quote_plus(new_password)
     if connection_string_type == 'jdbc':
-        conn_string = f"jdbc:postgresql://{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?user={secret_dict['username']}&password={encoded_password}ssl=true&sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
+        conn_string = f"jdbc:postgresql://{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?user={secret_dict['username']}&password={encoded_password}&ssl=true&sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
     elif connection_string_type == 'dotnet':
-        conn_string = f"Host={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};Username={secret_dict['username']};Password={encoded_password};SSL Mode={secret_dict.get('sslmode')};Search Path={secret_dict.get('schema', 'public')};"
+        conn_string = f"Host={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};Username={secret_dict['username']};Password={new_password};SSL Mode={secret_dict.get('sslmode')};Search Path={secret_dict.get('schema', 'public')};"
     elif connection_string_type == 'odbc':
-        conn_string = f"Driver={{PostgreSQL ODBC Driver(UNICODE)}};Server={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};UID={secret_dict['username']};PWD={encoded_password};sslmode={secret_dict.get('sslmode')};schema={secret_dict.get('schema', 'public')}"
+        conn_string = f"Driver={{PostgreSQL ODBC Driver(UNICODE)}};Server={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};UID={secret_dict['username']};PWD={new_password};sslmode={secret_dict.get('sslmode')};schema={secret_dict.get('schema', 'public')}"
     elif connection_string_type == 'gopq':
         conn_string = f"postgres://{secret_dict['username']}:{encoded_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
     elif connection_string_type == 'node-pg' or connection_string_type == 'psycopg' or connection_string_type == 'rustpg':
