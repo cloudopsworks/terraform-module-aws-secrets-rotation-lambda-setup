@@ -417,6 +417,7 @@ def generate_connection_string(secret_dict, new_password):
     """
     # Precondition: Ensure the secret_dict contains the necessary keys
     connection_string_type = secret_dict.get('connection_string_type')
+    logger.info("Generating connection string for secret: %s" % connection_string_type)
     if connection_string_type == 'jdbc':
         conn_string = f"jdbc:postgresql://{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?user={secret_dict['username']}&password={new_password}ssl=true&sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
     elif connection_string_type == 'dotnet':
@@ -429,5 +430,6 @@ def generate_connection_string(secret_dict, new_password):
         conn_string = f"postgressql://{secret_dict['username']}:{new_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
     else:
         conn_string = "(connection string type not supported)"
+        logger.warning("Connection string type not supported! Supported types are: node-pg, psycopg, rustpg, jdbc, odbc, dotnet, gopq.")
 
     return conn_string
