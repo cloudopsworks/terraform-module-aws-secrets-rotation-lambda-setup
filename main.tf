@@ -24,23 +24,32 @@ locals {
         value = "https://secretsmanager.${data.aws_region.current.name}.amazonaws.com"
       }
   ])
+  source_dir = "${path.module}/lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
 }
 
 resource "terraform_data" "function_pip" {
   triggers_replace = {
     always_run = tostring(timestamp())
   }
+  input = sha256(join("", [
+    for item in fileset(local.source_dir, "**/*") : filesha256(item)
+  ]))
   provisioner "local-exec" {
     working_dir = path.module
-    command     = "pip3 install --platform manylinux2014_x86_64 --target ${path.module}/lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"} --python-version 3.12 --implementation cp --only-binary=:all: --upgrade ${local.pip_map[var.settings.type]} "
+    command     = "pip3 install --platform manylinux2014_x86_64 --target ${local.source_dir} --python-version 3.12 --implementation cp --only-binary=:all: --upgrade ${local.pip_map[var.settings.type]} "
   }
 }
 
-data "archive_file" "rotate_code" {
+resource "archive_file" "rotate_code" {
   depends_on  = [terraform_data.function_pip]
   type        = "zip"
-  source_dir  = "${path.module}/lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
+  source_dir  = local.source_dir
   output_path = "${path.module}/lambda_rotation.zip"
+  lifecycle {
+    replace_triggered_by = [
+      terraform_data.function_pip
+    ]
+  }
 }
 
 resource "aws_lambda_function" "this" {
@@ -50,8 +59,8 @@ resource "aws_lambda_function" "this" {
   handler          = "lambda_function.lambda_handler"
   runtime          = "python3.12"
   package_type     = "Zip"
-  filename         = data.archive_file.rotate_code.output_path
-  source_code_hash = data.archive_file.rotate_code.output_base64sha256
+  filename         = archive_file.rotate_code.output_path
+  source_code_hash = archive_file.rotate_code.output_base64sha256
   memory_size      = try(var.settings.memory_size, 128)
   timeout          = try(var.settings.timeout, 60)
   publish          = true
