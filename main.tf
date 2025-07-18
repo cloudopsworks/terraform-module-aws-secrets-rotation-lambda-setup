@@ -48,7 +48,7 @@ resource "archive_file" "rotate_code" {
   output_path = "${path.module}/lambda_rotation.zip"
   lifecycle {
     replace_triggered_by = [
-      terraform_data.function_pip
+      terraform_data.function_pip.output
     ]
   }
 }
