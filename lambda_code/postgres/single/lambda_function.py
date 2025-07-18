@@ -288,6 +288,7 @@ def get_connection(secret_dict):
         logger.error("Unable to connect to database with secret dictionary %s, Error is: %s %s" % (redact_secret_dict(secret_dict), e.__class__, e))
         return None
 
+
 def redact_secret_dict(secret_dict):
     """Redacts the secret dictionary
 
@@ -395,6 +396,7 @@ def get_random_password(service_client):
         RequireEachIncludedType=get_environment_bool('REQUIRE_EACH_INCLUDED_TYPE', True)
     )
     return passwd['RandomPassword']
+
 
 def generate_connection_string(secret_dict, new_password):
     """Generates a connection string for the PostgreSQL database
