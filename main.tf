@@ -32,7 +32,7 @@ resource "terraform_data" "function_pip" {
     always_run = tostring(timestamp())
   }
   input = sha256(join("", [
-    for item in fileset(local.source_dir, "**/*") : filesha256(item)
+    for item in fileset("${local.source_dir}/**/*") : filesha256(item)
   ]))
   provisioner "local-exec" {
     working_dir = path.module
