@@ -115,7 +115,11 @@ def create_secret(service_client, arn, token):
     except service_client.exceptions.ResourceNotFoundException:
         # Get exclude characters from environment variable
         # Generate a random password
-        current_dict['password'] = get_random_password(service_client)
+        random_pass = get_random_password(service_client)
+        current_dict['password'] = random_pass
+        # Check if connection_string is present, if not do nothing
+        if 'connection_string' in current_dict:
+            current_dict['connection_string'] = generate_connection_string(current_dict, random_pass)
         # Put the secret
         service_client.put_secret_value(SecretId=arn, ClientRequestToken=token, SecretString=json.dumps(current_dict), VersionStages=['AWSPENDING'])
         logger.info("createSecret: Successfully put secret for ARN %s and version %s." % (arn, token))
@@ -391,3 +395,39 @@ def get_random_password(service_client):
         RequireEachIncludedType=get_environment_bool('REQUIRE_EACH_INCLUDED_TYPE', True)
     )
     return passwd['RandomPassword']
+
+def generate_connection_string(secret_dict, new_password):
+    """Generates a connection string for the PostgreSQL database
+
+    This helper function generates a connection string using the provided secret dictionary and new password.
+
+    Args:
+        secret_dict (dict): The Secret Dictionary containing connection details
+        new_password (str): The new password to be included in the connection string
+
+    Uses secret_dict['connection_string_type'] to determine the format of the connection string. supported formats are:
+        - node-pg | psycopg | rustpg: Uses psycopg2 format
+        - jdbc: Uses JDBC format
+        - odbc: Uses ODBC format
+        - dotnet: Uses .NET format
+        - gopq: Uses GO pq format
+
+    Returns:
+        str: The generated connection string
+    """
+    # Precondition: Ensure the secret_dict contains the necessary keys
+    connection_string_type = secret_dict.get('connection_string_type')
+    if connection_string_type == 'jdbc':
+        conn_string = f"jdbc:postgresql://{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?user={secret_dict['username']}&password={new_password}ssl=true&sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
+    elif connection_string_type == 'dotnet':
+        conn_string = f"Host={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};Username={secret_dict['username']};Password={new_password};SSL Mode={secret_dict.get('sslmode')};Search Path={secret_dict.get('schema', 'public')};"
+    elif connection_string_type == 'odbc':
+        conn_string = f"Driver={{PostgreSQL ODBC Driver(UNICODE)}};Server={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};UID={secret_dict['username']};PWD={new_password};sslmode={secret_dict.get('sslmode')};schema={secret_dict.get('schema', 'public')}"
+    elif connection_string_type == 'gopq':
+        conn_string = f"postgres://{secret_dict['username']}:{new_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
+    elif connection_string_type == 'node-pg' or connection_string_type == 'psycopg' or connection_string_type == 'rustpg':
+        conn_string = f"postgressql://{secret_dict['username']}:{new_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
+    else:
+        conn_string = "(connection string type not supported)"
+
+    return conn_string
