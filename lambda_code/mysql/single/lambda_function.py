@@ -485,7 +485,7 @@ def get_random_password(service_client):
         string: The randomly generated password.
     """
     passwd = service_client.get_random_password(
-        ExcludeCharacters=os.environ.get('EXCLUDE_CHARACTERS', ':/"\'\\$%&*()[]{}<>?!.,;|'),
+        ExcludeCharacters=os.environ.get('EXCLUDE_CHARACTERS', ':/"\'\\$%&*()[]{}<>?!.,;|`'),
         PasswordLength=int(os.environ.get('PASSWORD_LENGTH', 32)),
         ExcludeNumbers=get_environment_bool('EXCLUDE_NUMBERS', False),
         ExcludePunctuation=get_environment_bool('EXCLUDE_PUNCTUATION', False),
