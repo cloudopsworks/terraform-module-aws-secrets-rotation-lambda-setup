@@ -67,7 +67,7 @@ resource "terraform_data" "function_golang" {
   input = local.files_base64sha256
   provisioner "local-exec" {
     working_dir = "${local.source_dir}/"
-    command     = "GOOS=linux GOARCH=amd64 go build -v -o bootstrap go.mod"
+    command     = "GOOS=linux GOARCH=amd64 go build -v -o bootstrap"
   }
   provisioner "local-exec" {
     working_dir = "${local.source_dir}/"
