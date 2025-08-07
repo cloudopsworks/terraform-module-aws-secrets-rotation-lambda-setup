@@ -1,5 +1,5 @@
 // main.go
-package single
+package main
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	"go.mongodb.org/atlas-sdk/v20250312001/admin"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"net/url"
 )
 
 // SecretsManagerEvent
@@ -111,6 +112,10 @@ func init() {
 	InitAWS()
 }
 
+func EncodeString(value string) string {
+	return url.QueryEscape(value)
+}
+
 // CreateSecret
 //
 // Generate a new secret
@@ -143,7 +148,6 @@ func CreateSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		if err != nil {
 			return fmt.Errorf("CreateSecret: Failed to generate random password: %w", err)
 		}
-		currentDict["username"] = "admin"
 		currentDict["password"] = randomPass
 		connString, ok := currentDict["connection_string"]
 		if ok && strings.TrimSpace(connString) != "" {
@@ -272,7 +276,14 @@ func TestSecret(ctx context.Context, smClient *secretsmanager.Client, mongoAdmin
 		return fmt.Errorf("TestSecret: Failed to get connection for %v: %w", arn, err)
 	}
 
-	return conn.Ping(context.TODO(), nil)
+	err = conn.Ping(context.TODO(), nil)
+	if err != nil {
+		return fmt.Errorf("TestSecret: Failed to ping MongoDB with pending secret for %v: %w", arn, err)
+	} else {
+		log.Printf("TestSecret: Successfully pinged MongoDB with pending secret for %v", arn)
+	}
+
+	return nil
 }
 
 // FinishSecret
@@ -349,39 +360,53 @@ func FinishSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 func GetConnection(ctx context.Context, secretDict map[string]string) (*mongo.Client, error) {
 	// Try with private_connection_string_srv first, then private_connection_string, then connection_string_srv, then connection_string
 	var uri string
+	var conn *mongo.Client
+	var err error = nil
 	// Try with private_connection_string_srv first
+	log.Printf("GetConnection: Trying with private_connection_string_srv")
 	uri, ok := secretDict["private_connection_string_srv"]
 	if ok {
-		conn, err := mongo.Connect(options.Client().ApplyURI(uri))
-		if err == nil {
+		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
+		if err != nil {
+			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with private_connection_string_srv: %w", err)
+		} else {
 			return conn, nil
 		}
 	}
 	// Now try with private_connection_string
+	log.Printf("GetConnection: Trying with private_connection_string")
 	uri, ok = secretDict["private_connection_string"]
 	if ok {
-		conn, err := mongo.Connect(options.Client().ApplyURI(uri))
-		if err == nil {
+		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
+		if err != nil {
+			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with private_connection_string: %w", err)
+		} else {
 			return conn, nil
 		}
 	}
 	// Now try with connection_string_srv
+	log.Printf("GetConnection: Trying with connection_string_srv")
 	uri, ok = secretDict["connection_string_srv"]
 	if ok {
-		conn, err := mongo.Connect(options.Client().ApplyURI(uri))
-		if err == nil {
+		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
+		if err != nil {
+			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with connection_string_srv: %w", err)
+		} else {
 			return conn, nil
 		}
 	}
 	// Now try with connection_string
+	log.Printf("GetConnection: Trying with connection_string")
 	uri, ok = secretDict["connection_string"]
 	if ok {
-		conn, err := mongo.Connect(options.Client().ApplyURI(uri))
-		if err == nil {
+		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
+		if err != nil {
+			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with connection_string: %w", err)
+		} else {
 			return conn, nil
 		}
 	}
-	return nil, fmt.Errorf("GetConnection: Failed to get connection for %v", secretDict["arn"])
+	return nil, err
 }
 
 // GetSecretDict
@@ -458,7 +483,7 @@ func GetSecretDict(ctx context.Context, smClient *secretsmanager.Client, config 
 func GetRandomPassword(ctx context.Context, smClient *secretsmanager.Client) (string, error) {
 	excludeCharacters, ok := os.LookupEnv("EXCLUDE_CHARACTERS")
 	if !ok {
-		excludeCharacters = ":/\"\\'\\\\$%&*()[]{}<>?!.,;|`"
+		excludeCharacters = ":/\"\\'\\\\$%&*()[]{}<>?!.,;|`@"
 	}
 	passwordLengthStr, ok := os.LookupEnv("PASSWORD_LENGTH")
 	if !ok {
@@ -521,21 +546,19 @@ func GetEnvironmentBool(variableName string, defaultValue bool) bool {
 //	    map[string]string: The secret dictionary with the connection string generated for the given key
 //	    error: The error if any
 func GenerateConnectionString(key string, secretDict map[string]string, password string) (map[string]string, error) {
-	var connSplit []string
-	switch key {
-	case "connection_string":
-		connSplit = strings.Split(secretDict["url"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s%s", connSplit[0], secretDict["username"], password, connSplit[2], secretDict["dbname"], connSplit[3])
-	case "connection_string_srv":
-		connSplit = strings.Split(secretDict["url_srv"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s%s", connSplit[0], secretDict["username"], password, connSplit[2], secretDict["dbname"], connSplit[3])
-	case "private_connection_string":
-		connSplit = strings.Split(secretDict["url_srv"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s%s", connSplit[0], secretDict["username"], password, connSplit[2], secretDict["dbname"], connSplit[3])
-	case "private_connection_string_srv":
-		connSplit = strings.Split(secretDict["url_srv"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s%s", connSplit[0], secretDict["username"], password, connSplit[2], secretDict["dbname"], connSplit[3])
-	default:
+	var supportedStrings = []string{"connection_string", "connection_string_srv", "private_connection_string", "private_connection_string_srv"}
+	var host string
+	encodedPassword := url.QueryEscape(password)
+	if slices.Contains(supportedStrings, key) {
+		connSplit := strings.Split(secretDict[key], "/")
+		hostSplit := strings.Split(connSplit[2], "@")
+		if len(hostSplit) < 2 {
+			host = hostSplit[0]
+		} else {
+			host = hostSplit[1]
+		}
+		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], encodedPassword, host, connSplit[3])
+	} else {
 		return nil, fmt.Errorf("invalid key: %v", key)
 	}
 	return secretDict, nil

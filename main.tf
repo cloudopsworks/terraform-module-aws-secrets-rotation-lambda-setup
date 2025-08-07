@@ -36,6 +36,15 @@ locals {
   )
   source_root = "lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
   source_dir  = "${path.module}/${local.source_root}"
+  files_base64sha256 = base64encode(sha256(join("", [
+    for item in fileset(path.module, "${local.source_root}/**/*") : filesha256(item)
+  ])))
+  archive_file_name = "/tmp/lambda_rotation.zip"
+}
+
+moved {
+  from = terraform_data.function_pip
+  to   = terraform_data.function_pip[0]
 }
 
 resource "terraform_data" "function_pip" {
@@ -43,9 +52,7 @@ resource "terraform_data" "function_pip" {
   triggers_replace = {
     always_run = tostring(timestamp())
   }
-  input = sha256(join("", [
-    for item in fileset(path.module, "${local.source_root}/**/*") : filesha256(item)
-  ]))
+  input = local.files_base64sha256
   provisioner "local-exec" {
     working_dir = path.module
     command     = "pip3 install --platform manylinux2014_x86_64 --target ${local.source_dir} --python-version 3.12 --implementation cp --only-binary=:all: --upgrade ${local.pip_map[var.settings.type]} "
@@ -57,26 +64,27 @@ resource "terraform_data" "function_golang" {
   triggers_replace = {
     always_run = tostring(timestamp())
   }
-  input = sha256(join("", [
-    for item in fileset(path.module, "${local.source_root}/**/*") : filesha256(item)
-  ]))
+  input = local.files_base64sha256
   provisioner "local-exec" {
     working_dir = "${local.source_dir}/"
-    command     = "GOOS=linux GOARCH=amd64 go build -v -o bootstrap go.mod"
+    command     = "GOOS=linux GOARCH=amd64 go build -ldflags \"-s -w\" -o bootstrap"
+  }
+  provisioner "local-exec" {
+    working_dir = "${local.source_dir}/"
+    command     = "chmod +x bootstrap"
   }
 }
 
-resource "archive_file" "rotate_code" {
-  depends_on  = [terraform_data.function_pip]
-  type        = "zip"
-  source_dir  = local.source_dir
-  output_path = "${path.module}/lambda_rotation.zip"
-  lifecycle {
-    replace_triggered_by = [
-      terraform_data.function_pip.*.output,
-      terraform_data.function_golang.*.output
-    ]
+resource "terraform_data" "archive_file" {
+  triggers_replace = {
+    always_run = tostring(timestamp())
   }
+  input = local.files_base64sha256
+  provisioner "local-exec" {
+    working_dir = local.source_dir
+    command     = "zip -r ${local.archive_file_name} ."
+  }
+  depends_on = [terraform_data.function_pip, terraform_data.function_golang]
 }
 
 resource "aws_lambda_function" "this" {
@@ -86,8 +94,8 @@ resource "aws_lambda_function" "this" {
   handler          = var.settings.type == "mongodbatlas" ? "bootstrap" : "lambda_function.lambda_handler"
   runtime          = var.settings.type == "mongodbatlas" ? "provided.al2023" : "python3.12"
   package_type     = "Zip"
-  filename         = archive_file.rotate_code.output_path
-  source_code_hash = archive_file.rotate_code.output_base64sha256
+  filename         = local.archive_file_name
+  source_code_hash = local.files_base64sha256
   memory_size      = try(var.settings.memory_size, 128)
   timeout          = try(var.settings.timeout, 60)
   publish          = true
@@ -113,5 +121,6 @@ resource "aws_lambda_function" "this" {
   tags = local.all_tags
   depends_on = [
     aws_cloudwatch_log_group.logs,
+    terraform_data.archive_file
   ]
 }
