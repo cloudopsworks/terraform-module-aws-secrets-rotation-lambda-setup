@@ -543,7 +543,7 @@ func GetEnvironmentBool(variableName string, defaultValue bool) bool {
 func GenerateConnectionString(key string, secretDict map[string]string, password string) (map[string]string, error) {
 	var supportedStrings = []string{"connection_string", "connection_string_srv", "private_connection_string", "private_connection_string_srv"}
 	var host string
-	if !slices.Contains(supportedStrings, key) {
+	if slices.Contains(supportedStrings, key) {
 		connSplit := strings.Split(secretDict[key], "/")
 		hostSplit := strings.Split(connSplit[2], "@")
 		if len(hostSplit) < 2 {
