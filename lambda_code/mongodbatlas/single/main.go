@@ -1,5 +1,5 @@
 // main.go
-package single
+package main
 
 import (
 	"context"
