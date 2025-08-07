@@ -274,6 +274,8 @@ func TestSecret(ctx context.Context, smClient *secretsmanager.Client, mongoAdmin
 	err = conn.Ping(context.TODO(), nil)
 	if err != nil {
 		return fmt.Errorf("TestSecret: Failed to ping MongoDB with pending secret for %v: %w", arn, err)
+	} else {
+		log.Printf("TestSecret: Successfully pinged MongoDB with pending secret for %v", arn)
 	}
 
 	return nil
