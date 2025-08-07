@@ -348,39 +348,45 @@ func FinishSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 func GetConnection(ctx context.Context, secretDict map[string]string) (*mongo.Client, error) {
 	// Try with private_connection_string_srv first, then private_connection_string, then connection_string_srv, then connection_string
 	var uri string
+	var conn *mongo.Client
+	var err error
 	// Try with private_connection_string_srv first
+	log.Printf("GetConnection: Trying with private_connection_string_srv")
 	uri, ok := secretDict["private_connection_string_srv"]
 	if ok {
-		conn, err := mongo.Connect(options.Client().ApplyURI(uri))
-		if err == nil {
-			return conn, nil
+		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
+		if err != nil {
+			return nil, fmt.Errorf("GetConnection: Failed to connect to MongoDB with private_connection_string_srv: %w", err)
 		}
 	}
 	// Now try with private_connection_string
+	log.Printf("GetConnection: Trying with private_connection_string")
 	uri, ok = secretDict["private_connection_string"]
 	if ok {
-		conn, err := mongo.Connect(options.Client().ApplyURI(uri))
-		if err == nil {
-			return conn, nil
+		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
+		if err != nil {
+			return nil, fmt.Errorf("GetConnection: Failed to connect to MongoDB with private_connection_string: %w", err)
 		}
 	}
 	// Now try with connection_string_srv
+	log.Printf("GetConnection: Trying with connection_string_srv")
 	uri, ok = secretDict["connection_string_srv"]
 	if ok {
-		conn, err := mongo.Connect(options.Client().ApplyURI(uri))
-		if err == nil {
-			return conn, nil
+		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
+		if err != nil {
+			return nil, fmt.Errorf("GetConnection: Failed to connect to MongoDB with connection_string_srv: %w", err)
 		}
 	}
 	// Now try with connection_string
+	log.Printf("GetConnection: Trying with connection_string")
 	uri, ok = secretDict["connection_string"]
 	if ok {
-		conn, err := mongo.Connect(options.Client().ApplyURI(uri))
-		if err == nil {
-			return conn, nil
+		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
+		if err != nil {
+			return nil, fmt.Errorf("GetConnection: Failed to connect to MongoDB with connection_string: %w", err)
 		}
 	}
-	return nil, fmt.Errorf("GetConnection: Failed to get connection for %v", secretDict["arn"])
+	return conn, nil
 }
 
 // GetSecretDict
