@@ -521,20 +521,19 @@ func GetEnvironmentBool(variableName string, defaultValue bool) bool {
 //	    map[string]string: The secret dictionary with the connection string generated for the given key
 //	    error: The error if any
 func GenerateConnectionString(key string, secretDict map[string]string, password string) (map[string]string, error) {
-	var connSplit []string
 	switch key {
 	case "connection_string":
-		connSplit = strings.Split(secretDict["url"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s%s", connSplit[0], secretDict["username"], password, connSplit[2], secretDict["dbname"], connSplit[3])
+		connSplit := strings.Split(secretDict["connection_string"], "/")
+		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, connSplit[2], connSplit[3])
 	case "connection_string_srv":
-		connSplit = strings.Split(secretDict["url_srv"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s%s", connSplit[0], secretDict["username"], password, connSplit[2], secretDict["dbname"], connSplit[3])
+		connSplit := strings.Split(secretDict["connection_string_srv"], "/")
+		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, connSplit[2], connSplit[3])
 	case "private_connection_string":
-		connSplit = strings.Split(secretDict["url_srv"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s%s", connSplit[0], secretDict["username"], password, connSplit[2], secretDict["dbname"], connSplit[3])
+		connSplit := strings.Split(secretDict["private_connection_string"], "/")
+		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, connSplit[2], connSplit[3])
 	case "private_connection_string_srv":
-		connSplit = strings.Split(secretDict["url_srv"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s%s", connSplit[0], secretDict["username"], password, connSplit[2], secretDict["dbname"], connSplit[3])
+		connSplit := strings.Split(secretDict["private_connection_string_srv"], "/")
+		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, connSplit[2], connSplit[3])
 	default:
 		return nil, fmt.Errorf("invalid key: %v", key)
 	}
