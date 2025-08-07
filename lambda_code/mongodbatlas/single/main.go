@@ -18,6 +18,7 @@ import (
 	"go.mongodb.org/atlas-sdk/v20250312001/admin"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"net/url"
 )
 
 // SecretsManagerEvent
@@ -111,6 +112,10 @@ func init() {
 	InitAWS()
 }
 
+func EncodeString(value string) string {
+	return url.QueryEscape(value)
+}
+
 // CreateSecret
 //
 // Generate a new secret
@@ -143,7 +148,7 @@ func CreateSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		if err != nil {
 			return fmt.Errorf("CreateSecret: Failed to generate random password: %w", err)
 		}
-		currentDict["password"] = randomPass
+		currentDict["password"] = EncodeString(randomPass)
 		connString, ok := currentDict["connection_string"]
 		if ok && strings.TrimSpace(connString) != "" {
 			_, err = GenerateConnectionString("connection_string", currentDict, randomPass)
