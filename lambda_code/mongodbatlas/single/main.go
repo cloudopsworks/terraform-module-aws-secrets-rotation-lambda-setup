@@ -148,7 +148,7 @@ func CreateSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		if err != nil {
 			return fmt.Errorf("CreateSecret: Failed to generate random password: %w", err)
 		}
-		currentDict["password"] = EncodeString(randomPass)
+		currentDict["password"] = randomPass
 		connString, ok := currentDict["connection_string"]
 		if ok && strings.TrimSpace(connString) != "" {
 			_, err = GenerateConnectionString("connection_string", currentDict, randomPass)
@@ -548,6 +548,7 @@ func GetEnvironmentBool(variableName string, defaultValue bool) bool {
 func GenerateConnectionString(key string, secretDict map[string]string, password string) (map[string]string, error) {
 	var supportedStrings = []string{"connection_string", "connection_string_srv", "private_connection_string", "private_connection_string_srv"}
 	var host string
+	encodedPassword := url.QueryEscape(password)
 	if slices.Contains(supportedStrings, key) {
 		connSplit := strings.Split(secretDict[key], "/")
 		hostSplit := strings.Split(connSplit[2], "@")
@@ -556,7 +557,7 @@ func GenerateConnectionString(key string, secretDict map[string]string, password
 		} else {
 			host = hostSplit[1]
 		}
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, host, connSplit[3])
+		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], encodedPassword, host, connSplit[3])
 	} else {
 		return nil, fmt.Errorf("invalid key: %v", key)
 	}
