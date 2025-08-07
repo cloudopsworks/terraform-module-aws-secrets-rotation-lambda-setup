@@ -121,5 +121,6 @@ resource "aws_lambda_function" "this" {
   tags = local.all_tags
   depends_on = [
     aws_cloudwatch_log_group.logs,
+    terraform_data.archive_file
   ]
 }
