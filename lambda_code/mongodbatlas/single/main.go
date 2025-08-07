@@ -478,7 +478,7 @@ func GetSecretDict(ctx context.Context, smClient *secretsmanager.Client, config 
 func GetRandomPassword(ctx context.Context, smClient *secretsmanager.Client) (string, error) {
 	excludeCharacters, ok := os.LookupEnv("EXCLUDE_CHARACTERS")
 	if !ok {
-		excludeCharacters = ":/\"\\'\\\\$%&*()[]{}<>?!.,;|`"
+		excludeCharacters = ":/\"\\'\\\\$%&*()[]{}<>?!.,;|`@"
 	}
 	passwordLengthStr, ok := os.LookupEnv("PASSWORD_LENGTH")
 	if !ok {
