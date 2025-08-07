@@ -39,7 +39,7 @@ locals {
   files_base64sha256 = base64encode(sha256(join("", [
     for item in fileset(path.module, "${local.source_root}/**/*") : filesha256(item)
   ])))
-  archive_file_name = "/tmp/%s/lambda_rotation.zip"
+  archive_file_name = "/tmp/lambda_rotation.zip"
 }
 
 moved {
