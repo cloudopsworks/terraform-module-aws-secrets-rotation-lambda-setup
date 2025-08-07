@@ -143,7 +143,6 @@ func CreateSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		if err != nil {
 			return fmt.Errorf("CreateSecret: Failed to generate random password: %w", err)
 		}
-		currentDict["username"] = "admin"
 		currentDict["password"] = randomPass
 		connString, ok := currentDict["connection_string"]
 		if ok && strings.TrimSpace(connString) != "" {
