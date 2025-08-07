@@ -39,8 +39,8 @@ locals {
 }
 
 moved {
-  from = "terraform_data.function_pip"
-  to   = "terraform_data.function_pip[0]"
+  from = terraform_data.function_pip
+  to   = terraform_data.function_pip[0]
 }
 
 resource "terraform_data" "function_pip" {
