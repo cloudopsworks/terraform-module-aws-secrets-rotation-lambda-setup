@@ -12,13 +12,14 @@ locals {
   function_name       = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
   function_name_short = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
   pip_map = {
-    postgres = "\"psycopg[binary]\" typing_extensions"
-    mysql    = "PyMySQL"
-    mariadb  = "PyMySQL"
-    mssql    = "pymssql"
-    mongodb  = "pymongo"
-    oracle   = "python-oracledb"
-    db2      = "python-ibmdb"
+    postgres     = "\"psycopg[binary]\" typing_extensions"
+    mysql        = "PyMySQL"
+    mariadb      = "PyMySQL"
+    mssql        = "pymssql"
+    mongodb      = "pymongo"
+    mongodbatlas = "[golang]"
+    oracle       = "python-oracledb"
+    db2          = "python-ibmdb"
   }
   variables = concat(try(var.settings.environment.variables, []),
     [
@@ -38,6 +39,7 @@ locals {
 }
 
 resource "terraform_data" "function_pip" {
+  count = local.pip_map[var.settings.type] != "[golang]" ? 1 : 0
   triggers_replace = {
     always_run = tostring(timestamp())
   }
@@ -50,6 +52,20 @@ resource "terraform_data" "function_pip" {
   }
 }
 
+resource "terraform_data" "function_golang" {
+  count = local.pip_map[var.settings.type] == "[golang]" ? 1 : 0
+  triggers_replace = {
+    always_run = tostring(timestamp())
+  }
+  input = sha256(join("", [
+    for item in fileset(path.module, "${local.source_root}/**/*") : filesha256(item)
+  ]))
+  provisioner "local-exec" {
+    working_dir = "${local.source_dir}/"
+    command     = "GOOS=linux GOARCH=amd64 go build -v -o bootstrap go.mod"
+  }
+}
+
 resource "archive_file" "rotate_code" {
   depends_on  = [terraform_data.function_pip]
   type        = "zip"
@@ -57,7 +73,8 @@ resource "archive_file" "rotate_code" {
   output_path = "${path.module}/lambda_rotation.zip"
   lifecycle {
     replace_triggered_by = [
-      terraform_data.function_pip.output
+      terraform_data.function_pip.*.output,
+      terraform_data.function_golang.*.output
     ]
   }
 }
@@ -66,8 +83,8 @@ resource "aws_lambda_function" "this" {
   function_name    = local.function_name
   description      = try(var.settings.description, "Secret Rotation Lambda - ${var.settings.type} - MultiUser: ${local.multi_user == true ? "Yes" : "No"}")
   role             = aws_iam_role.default_lambda_function.arn
-  handler          = "lambda_function.lambda_handler"
-  runtime          = "python3.12"
+  handler          = var.settings.type == "mongodbatlas" ? "bootstrap" : "lambda_function.lambda_handler"
+  runtime          = var.settings.type == "mongodbatlas" ? "provided.al2023" : "python3.12"
   package_type     = "Zip"
   filename         = archive_file.rotate_code.output_path
   source_code_hash = archive_file.rotate_code.output_base64sha256
