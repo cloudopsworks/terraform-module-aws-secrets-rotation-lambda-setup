@@ -541,20 +541,18 @@ func GetEnvironmentBool(variableName string, defaultValue bool) bool {
 //	    map[string]string: The secret dictionary with the connection string generated for the given key
 //	    error: The error if any
 func GenerateConnectionString(key string, secretDict map[string]string, password string) (map[string]string, error) {
-	switch key {
-	case "connection_string":
-		connSplit := strings.Split(secretDict["connection_string"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, connSplit[2], connSplit[3])
-	case "connection_string_srv":
-		connSplit := strings.Split(secretDict["connection_string_srv"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, connSplit[2], connSplit[3])
-	case "private_connection_string":
-		connSplit := strings.Split(secretDict["private_connection_string"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, connSplit[2], connSplit[3])
-	case "private_connection_string_srv":
-		connSplit := strings.Split(secretDict["private_connection_string_srv"], "/")
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, connSplit[2], connSplit[3])
-	default:
+	var supportedStrings = []string{"connection_string", "connection_string_srv", "private_connection_string", "private_connection_string_srv"}
+	var host string
+	if !slices.Contains(supportedStrings, key) {
+		connSplit := strings.Split(secretDict[key], "/")
+		hostSplit := strings.Split(connSplit[2], "@")
+		if len(hostSplit) < 2 {
+			host = hostSplit[0]
+		} else {
+			host = hostSplit[1]
+		}
+		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], password, host, connSplit[3])
+	} else {
 		return nil, fmt.Errorf("invalid key: %v", key)
 	}
 	return secretDict, nil
