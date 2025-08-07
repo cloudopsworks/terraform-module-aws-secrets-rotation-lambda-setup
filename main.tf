@@ -67,10 +67,10 @@ resource "terraform_data" "function_golang" {
 }
 
 resource "archive_file" "rotate_code" {
-  depends_on  = [terraform_data.function_pip]
   type        = "zip"
   source_dir  = local.source_dir
   output_path = "${path.module}/lambda_rotation.zip"
+  depends_on  = [terraform_data.function_pip, terraform_data.function_golang]
   lifecycle {
     replace_triggered_by = [
       terraform_data.function_pip,
