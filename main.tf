@@ -38,6 +38,11 @@ locals {
   source_dir  = "${path.module}/${local.source_root}"
 }
 
+moved {
+  from = "terraform_data.function_pip"
+  to   = "terraform_data.function_pip[0]"
+}
+
 resource "terraform_data" "function_pip" {
   count = local.pip_map[var.settings.type] != "[golang]" ? 1 : 0
   triggers_replace = {
