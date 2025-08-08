@@ -81,6 +81,9 @@ resource "terraform_data" "archive_file" {
   }
   input = local.files_base64sha256
   provisioner "local-exec" {
+    command = "[ -f ${local.archive_file_name} ] && rm -f ${local.archive_file_name} || echo 'No existing archive to remove, sikipping...'"
+  }
+  provisioner "local-exec" {
     working_dir = local.source_dir
     command     = "zip -r ${local.archive_file_name} ."
   }
