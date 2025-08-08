@@ -233,11 +233,11 @@ func SetSecret(ctx context.Context, smClient *secretsmanager.Client, mongoAdmin 
 	}
 	projectName, ok := pendingDict["project_name"]
 	if !ok {
-		return fmt.Errorf("SetSecret: Failed to get project_name for %v: %w, please update with proper mongodbatlas management module", arn, err)
+		return fmt.Errorf("SetSecret: Failed to get project_name for %v, please update with proper mongodbatlas management module", arn)
 	}
 	projectId, ok := pendingDict["project_id"]
 	if !ok {
-		return fmt.Errorf("SetSecret: Failed to get project_id for %v: %w, please update with proper mongodbatlas management module", arn, err)
+		return fmt.Errorf("SetSecret: Failed to get project_id for %v, please update with proper mongodbatlas management module", arn)
 	}
 	project, _, err := mongoAdmin.ProjectsApi.GetProject(ctx, projectId).Execute()
 	if err != nil {
