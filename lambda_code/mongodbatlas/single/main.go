@@ -558,7 +558,7 @@ func GenerateConnectionString(key string, secretDict map[string]string, password
 		} else {
 			host = hostSplit[1]
 		}
-		if len(connSplit) > 2 {
+		if len(connSplit) > 3 {
 			secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], encodedPassword, host, connSplit[3])
 		} else {
 			secretDict[key] = fmt.Sprintf("%s//%s:%s@%s", connSplit[0], secretDict["username"], encodedPassword, host)
