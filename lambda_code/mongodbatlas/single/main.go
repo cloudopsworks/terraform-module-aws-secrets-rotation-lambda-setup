@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"net/url"
+
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -18,7 +20,6 @@ import (
 	"go.mongodb.org/atlas-sdk/v20250312001/admin"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"net/url"
 )
 
 // SecretsManagerEvent
@@ -557,7 +558,11 @@ func GenerateConnectionString(key string, secretDict map[string]string, password
 		} else {
 			host = hostSplit[1]
 		}
-		secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], encodedPassword, host, connSplit[3])
+		if len(connSplit) > 2 {
+			secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], encodedPassword, host, connSplit[3])
+		} else {
+			secretDict[key] = fmt.Sprintf("%s//%s:%s@%s", connSplit[0], secretDict["username"], encodedPassword, host)
+		}
 	} else {
 		return nil, fmt.Errorf("invalid key: %v", key)
 	}
