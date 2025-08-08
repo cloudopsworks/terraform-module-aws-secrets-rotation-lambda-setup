@@ -227,24 +227,30 @@ func SetSecret(ctx context.Context, smClient *secretsmanager.Client, mongoAdmin 
 	}
 	username := pendingDict["username"]
 	password := pendingDict["password"]
-	auth_database, ok := pendingDict["auth_database"]
+	authDatabase, ok := pendingDict["auth_database"]
 	if !ok {
-		auth_database = "admin"
+		authDatabase = "admin"
 	}
-	project_name := pendingDict["project_name"]
-	project_id := pendingDict["project_id"]
-	project, _, err := mongoAdmin.ProjectsApi.GetProject(ctx, project_id).Execute()
-	if err != nil {
-		return fmt.Errorf("SetSecret: Failed to get project %v - %v : %w", project_id, project_name, err)
+	projectName, ok := pendingDict["project_name"]
+	if !ok {
+		return fmt.Errorf("SetSecret: Failed to get project_name for %v, please update with proper mongodbatlas management module", arn)
 	}
-	user, _, err := mongoAdmin.DatabaseUsersApi.GetDatabaseUser(ctx, *project.Id, auth_database, username).Execute()
+	projectId, ok := pendingDict["project_id"]
+	if !ok {
+		return fmt.Errorf("SetSecret: Failed to get project_id for %v, please update with proper mongodbatlas management module", arn)
+	}
+	project, _, err := mongoAdmin.ProjectsApi.GetProject(ctx, projectId).Execute()
 	if err != nil {
-		return fmt.Errorf("SetSecret: Failed to get user %v - %v : %w", username, project_name, err)
+		return fmt.Errorf("SetSecret: Failed to get project %v - %v : %w", projectId, projectName, err)
+	}
+	user, _, err := mongoAdmin.DatabaseUsersApi.GetDatabaseUser(ctx, *project.Id, authDatabase, username).Execute()
+	if err != nil {
+		return fmt.Errorf("SetSecret: Failed to get user %v - %v : %w", username, projectName, err)
 	}
 	user.Password = &password
-	_, _, err = mongoAdmin.DatabaseUsersApi.UpdateDatabaseUser(ctx, *project.Id, auth_database, username, user).Execute()
+	_, _, err = mongoAdmin.DatabaseUsersApi.UpdateDatabaseUser(ctx, *project.Id, authDatabase, username, user).Execute()
 	if err != nil {
-		return fmt.Errorf("SetSecret: Failed to update user %v - %v : %w", username, project_name, err)
+		return fmt.Errorf("SetSecret: Failed to update user %v - %v : %w", username, projectName, err)
 	}
 	log.Printf("SetSecret: Successfully set secret for %v", arn)
 	return nil
