@@ -6,6 +6,7 @@
 #       WebSite: https://cloudops.works
 #     Distributed Under Apache v2.0 License
 #
+
 locals {
   region_arr        = split("-", data.aws_region.current.id)
   region            = format("%s%s%s", lower(local.region_arr[0]), lower(substr(local.region_arr[1], 0, 2)), lower(local.region_arr[2]))
