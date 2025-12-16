@@ -8,16 +8,16 @@
 #
 
 terraform {
-  required_version = ">= 1.3"
+  required_version = ">= 1.7"
   # Complete with required providers for the module
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 6.4"
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 7.0"
     }
-    archive = {
-      source  = "hashicorp/archive"
-      version = "~> 2.7"
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 7.0"
     }
   }
 }
