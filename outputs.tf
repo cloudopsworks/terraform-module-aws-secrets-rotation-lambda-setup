@@ -29,3 +29,11 @@ output "lambda_cloudwatch_log" {
 output "lambda_cloudwatch_log_arn" {
   value = aws_cloudwatch_log_group.logs.arn
 }
+
+output "lambda_security_group_name" {
+  value = try(var.vpc.create_security_group, false) && try(var.vpc.enabled, false) ? aws_security_group.this[0].name : null
+}
+
+output "lambda_security_group_id" {
+  value = try(var.vpc.create_security_group, false) && try(var.vpc.enabled, false) ? aws_security_group.this[0].id : null
+}
