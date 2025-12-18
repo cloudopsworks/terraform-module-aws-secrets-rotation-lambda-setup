@@ -25,7 +25,7 @@ locals {
     [
       {
         name  = "SECRETS_MANAGER_ENDPOINT"
-        value = "https://secretsmanager.${data.aws_region.current.name}.amazonaws.com"
+        value = "https://secretsmanager.${data.aws_region.current.id}.amazonaws.com"
       },
     ],
     try(var.settings.password_length, -1) >= 24 ? [
