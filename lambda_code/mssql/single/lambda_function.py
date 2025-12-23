@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pymssql
+import urllib.parse
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
