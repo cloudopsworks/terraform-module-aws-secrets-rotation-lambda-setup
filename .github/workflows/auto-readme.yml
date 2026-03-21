@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: readme/update
         shell: bash
         env:
@@ -34,9 +34,11 @@ jobs:
           make init
           make readme/deps
           make readme
+      # Create a PR only if not on a pull request event (to avoid error)
       - name: Create Pull Request
         uses: cloudopsworks/create-pull-request@v4
-        with: 
+        if: (github.event_name != 'pull_request')
+        with:
           labels: automated pr
         env:
           token: ${{ secrets.BOT_TOKEN }}
