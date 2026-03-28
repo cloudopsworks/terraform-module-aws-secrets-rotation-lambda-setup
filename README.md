@@ -159,6 +159,9 @@ Available targets:
   help                                Help screen
   help/all                            Display help for all targets
   help/short                          This help short screen
+  init/aws                            Initialize the project for a specific cloud provider: AWS
+  init/azurerm                        Initialize the project for a specific cloud provider: Azure RM
+  init/gcp                            Initialize the project for a specific cloud provider: GCP
   lint                                Lint terraform/opentofu code
   tag                                 Tag the current version
 
@@ -169,14 +172,13 @@ Available targets:
 |------|---------|
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3 |
 | <a name="requirement_archive"></a> [archive](#requirement\_archive) | ~> 2.7 |
-| <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 5.0 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.4 |
 
 ## Providers
 
 | Name | Version |
 |------|---------|
-| <a name="provider_archive"></a> [archive](#provider\_archive) | 2.7.0 |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | 5.94.1 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.4 |
 | <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
 
 ## Modules
@@ -189,7 +191,6 @@ Available targets:
 
 | Name | Type |
 |------|------|
-| [archive_file.rotate_code](https://registry.terraform.io/providers/hashicorp/archive/latest/docs/resources/file) | resource |
 | [aws_cloudwatch_log_group.logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
 | [aws_iam_role.default_lambda_function](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role_policy.allowed_kms](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
@@ -200,6 +201,8 @@ Available targets:
 | [aws_lambda_function.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function) | resource |
 | [aws_lambda_permission.allow_secret_manager_call_Lambda](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_permission) | resource |
 | [aws_security_group.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
+| [terraform_data.archive_file](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [terraform_data.function_golang](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 | [terraform_data.function_pip](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 | [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
 | [aws_iam_policy_document.allowed_kms](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
@@ -232,6 +235,8 @@ Available targets:
 | <a name="output_lambda_exec_role"></a> [lambda\_exec\_role](#output\_lambda\_exec\_role) | n/a |
 | <a name="output_lambda_exec_role_arn"></a> [lambda\_exec\_role\_arn](#output\_lambda\_exec\_role\_arn) | n/a |
 | <a name="output_lambda_name"></a> [lambda\_name](#output\_lambda\_name) | # (c) 2021-2025 Cloud Ops Works LLC - https://cloudops.works/ Find us on: GitHub: https://github.com/cloudopsworks WebSite: https://cloudops.works Distributed Under Apache v2.0 License |
+| <a name="output_lambda_security_group_id"></a> [lambda\_security\_group\_id](#output\_lambda\_security\_group\_id) | n/a |
+| <a name="output_lambda_security_group_name"></a> [lambda\_security\_group\_name](#output\_lambda\_security\_group\_name) | n/a |
 
 
 
@@ -265,7 +270,7 @@ Please use the [issue tracker](https://github.com/cloudopsworks/terraform-module
 
 ## Copyrights
 
-Copyright © 2024-2025 [Cloud Ops Works LLC](https://cloudops.works)
+Copyright © 2024-2026 [Cloud Ops Works LLC](https://cloudops.works)
 
 
 
