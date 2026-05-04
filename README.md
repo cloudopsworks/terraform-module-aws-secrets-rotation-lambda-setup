@@ -12,10 +12,10 @@
 
 # Terraform AWS Lambda Secrets Rotation Module
 
+ [![Latest Release](https://img.shields.io/github/release/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.svg?style=for-the-badge)](https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup/releases/latest) [![Last Updated](https://img.shields.io/github/last-commit/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.svg?style=for-the-badge)](https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup/commits)
 
 
-
-AWS Lambda Secrets Rotation Module for managing automated credential rotation for various database types including MongoDB, PostgreSQL, MySQL, MariaDB, MSSQL, MongoDB Atlas, Oracle and DB2. Supports both single-user and multi-user rotation strategies with VPC connectivity options.
+Terraform module that packages and deploys an AWS Secrets Manager rotation Lambda for PostgreSQL, MySQL, MariaDB, MSSQL, MongoDB, MongoDB Atlas, Oracle, and DB2 engines, with optional VPC attachment and IAM extensions.
 
 
 ---
@@ -45,7 +45,7 @@ We have [*lots of terraform modules*][terraform_modules] that are Open Source an
 
 ## Introduction
 
-This module creates and manages AWS Lambda functions for automated secret rotation in AWS Secrets Manager. It supports multiple database types and can be configured for both single-user and multi-user rotation strategies. The module includes automatic dependency management for database-specific Python packages and comprehensive logging configuration.
+This module creates the AWS Lambda function, execution role, CloudWatch log group, optional VPC networking, and supporting IAM policies required to run Secrets Manager rotation workflows. It supports both single-user and alternating-users rotation patterns, injects engine-specific dependencies during packaging, and exposes the Lambda and networking outputs needed by downstream stacks.
 
 ## Usage
 
@@ -54,95 +54,146 @@ This module creates and manages AWS Lambda functions for automated secret rotati
 Instead pin to the release tag (e.g. `?ref=vX.Y.Z`) of one of our [latest releases](https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup/releases).
 
 
-Configure the module using the following YAML structure in your Terraform variables:
+Bootstrap a new Terragrunt unit with Terragrunt scaffold, then fill in the generated `inputs.yaml`.
+
+```bash
+terragrunt scaffold \
+  github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup//.boilerplate \
+  --var="sourceUrl=git::https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.git//?ref=v1.4.0"
+```
+
+Example generated `inputs.yaml`:
 
 ```yaml
 settings:
-  description: "Database Secrets Rotation Lambda"  # Optional description
-  type: postgres|mysql|mariadb|mssql|mongodb|oracle|db2  # Required database type
-  multi_user: true|false  # Optional, defaults to false
-  timeout: 30  # Optional, defaults to 60 seconds
-  memory_size: 128  # Optional, defaults to 128 MB
-  password_length: 30  # Optional, defaults to 30 (must be >24)
-  logging:  # Optional logging configuration
-    log_format: JSON|TEXT  # Defaults to JSON
-    application_log_level: INFO|DEBUG|ERROR
-    system_log_level: INFO|DEBUG|ERROR
-  environment:
-    variables:  # Optional additional environment variables
-      - name: CUSTOM_VAR
-        value: custom_value
+  type: postgres # (Required) Database engine used by the rotation Lambda. Valid values: postgres, mysql, mariadb, mssql, mongodb, mongodbatlas, oracle, db2.
+  description: "Secrets rotation lambda for the primary application database" # (Optional) Custom Lambda description. Default: Terraform builds one from type and multi_user.
+  multi_user: false # (Optional) Enable alternating-users rotation strategy. Default: false.
+  timeout: 60 # (Optional) Lambda timeout in seconds. Default: 60.
+  memory_size: 256 # (Optional) Lambda memory size in MB. Default: 128.
+  password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
+  log_retention_days: 14 # (Optional) CloudWatch Logs retention in days. Default: 14.
+  logging: # (Optional) Lambda advanced logging configuration.
+    log_format: JSON # (Optional) Log output format. Valid values: JSON, Text. Default: JSON.
+    application_log_level: INFO # (Optional) Application log threshold. Valid values: TRACE, DEBUG, INFO, WARN, ERROR, FATAL.
+    system_log_level: INFO # (Optional) System log threshold. Valid values: DEBUG, INFO, WARN.
+  environment: # (Optional) Additional Lambda environment variables.
+    variables:
+      - name: EXTRA_CA_CERTS # (Required) Environment variable name.
+        value: /opt/certs/custom-ca.pem # (Required) Environment variable value.
+  allowed_secrets: # (Optional) Additional Secrets Manager secret ARNs the rotation function may read and update.
+    - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/postgres-credentials-AbCdEf
+  allowed_kms: # (Optional) KMS key ARNs used to decrypt the allowed secrets.
+    - arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
+  iam: # (Optional) Additional IAM policy statements to attach to the Lambda execution role.
+    statements:
+      - effect: Allow # (Required) IAM statement effect.
+        action: # (Required) IAM actions to allow or deny.
+          - rds-db:connect
+        resource: # (Required) ARNs the statement applies to.
+          - arn:aws:rds-db:us-east-1:111122223333:dbuser:db-ABCDEFGHIJKLMNOP/app_user
 
-vpc:  # Optional VPC configuration
-  enabled: true|false
-  subnets:  # Required if vpc enabled
-    - subnet-id1
-    - subnet-id2
-  create_security_group: true|false
-  security_groups:  # Required if create_security_group is false
-    - sg-12345678
+vpc:
+  enabled: true # (Optional) Attach the Lambda function to a VPC. Default: false.
+  subnets: # (Required when vpc.enabled is true) Private subnet IDs for Lambda ENIs.
+    - subnet-0123456789abcdef0
+    - subnet-0fedcba9876543210
+  create_security_group: true # (Optional) Create a dedicated security group for the Lambda. Default: false.
+  security_groups: # (Required when vpc.enabled is true and create_security_group is false) Existing security group IDs to attach.
+    - sg-0123456789abcdef0
+```
+
+Example generated `terragrunt.hcl`:
+
+```hcl
+locals {
+  local_vars  = yamldecode(file("./inputs.yaml"))
+  spoke_vars  = yamldecode(file(find_in_parent_folders("spoke-inputs.yaml")))
+  region_vars = yamldecode(file(find_in_parent_folders("region-inputs.yaml")))
+  env_vars    = yamldecode(file(find_in_parent_folders("env-inputs.yaml")))
+  global_vars = yamldecode(file(find_in_parent_folders("global-inputs.yaml")))
+
+  local_tags  = jsondecode(file("./local-tags.json"))
+  spoke_tags  = jsondecode(file(find_in_parent_folders("spoke-tags.json")))
+  region_tags = jsondecode(file(find_in_parent_folders("region-tags.json")))
+  env_tags    = jsondecode(file(find_in_parent_folders("env-tags.json")))
+  global_tags = jsondecode(file(find_in_parent_folders("global-tags.json")))
+
+  tags = merge(
+    local.global_tags,
+    local.env_tags,
+    local.region_tags,
+    local.spoke_tags,
+    local.local_tags,
+  )
+}
+
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "git::https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.git//?ref=v1.4.0"
+}
+
+inputs = {
+  is_hub     = false
+  org        = local.env_vars.org
+  spoke_def  = local.spoke_vars.spoke
+  settings   = local.local_vars.settings
+  vpc        = try(local.local_vars.vpc, {})
+  extra_tags = local.tags
+}
 ```
 
 ## Quick Start
 
-1. Add the module to your Terraform configuration:
-   ```hcl
-   module "secrets_rotation" {
-     source = "cloudopsworks/secrets-rotation/aws"
-     version = "1.0.0"
-
-     settings = {
-       type = "postgres"
-       multi_user = false
-     }
-   }
-   ```
-
-2. Initialize Terraform:
+1. Scaffold the unit with Terragrunt:
    ```bash
-   terraform init
+   terragrunt scaffold \
+     github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup//.boilerplate \
+     --var="sourceUrl=git::https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.git//?ref=v1.4.0"
    ```
-
-3. Apply the configuration:
-   ```bash
-   terraform apply
-   ```
-
-4. The Lambda function will be created and ready to use with AWS Secrets Manager rotation.
+2. Update `inputs.yaml` with your engine type, secret access, and optional VPC settings.
+3. Review the generated `terragrunt.hcl` and pin `sourceUrl` to the release you want to consume.
+4. Run `terragrunt hcl fmt`, then `terragrunt plan` and `terragrunt apply` from the new unit directory.
 
 
 ## Examples
 
-# Terragrunt configuration example (terragrunt.hcl):
-```hcl
-include "root" {
-  path = find_in_parent_folders()
-}
+The example below enables alternating-users rotation for PostgreSQL in private subnets and adds explicit access to the rotated secret and its KMS key.
 
-terraform {
-  source = "git::https://github.com/cloudopsworks/terraform-aws-secrets-rotation.git?ref=v1.0.0"
-}
+```yaml
+settings:
+  type: postgres
+  description: "Rotation Lambda for the primary PostgreSQL secret"
+  multi_user: true
+  timeout: 120
+  memory_size: 256
+  password_length: 32
+  log_retention_days: 30
+  logging:
+    log_format: JSON
+    application_log_level: INFO
+    system_log_level: WARN
+  allowed_secrets:
+    - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/postgres-primary-AbCdEf
+  allowed_kms:
+    - arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
+  iam:
+    statements:
+      - effect: Allow
+        action:
+          - rds-db:connect
+        resource:
+          - arn:aws:rds-db:us-east-1:111122223333:dbuser:db-ABCDEFGHIJKLMNOP/app_user
 
-inputs = {
-  settings = {
-    type = "postgres"
-    multi_user = true
-    description = "PostgreSQL Secrets Rotation"
-    memory_size = 256
-    timeout = 120
-    password_length = 32
-    logging = {
-      log_format = "JSON"
-      application_log_level = "INFO"
-    }
-  }
-
-  vpc = {
-    enabled = true
-    subnets = ["subnet-abc123", "subnet-def456"]
-    create_security_group = true
-  }
-}
+vpc:
+  enabled: true
+  subnets:
+    - subnet-0123456789abcdef0
+    - subnet-0fedcba9876543210
+  create_security_group: true
 ```
 
 
@@ -222,14 +273,14 @@ Available targets:
 
 | Name | Description |
 |------|-------------|
-| <a name="output_lambda_arn"></a> [lambda\_arn](#output\_lambda\_arn) | n/a |
-| <a name="output_lambda_cloudwatch_log"></a> [lambda\_cloudwatch\_log](#output\_lambda\_cloudwatch\_log) | n/a |
-| <a name="output_lambda_cloudwatch_log_arn"></a> [lambda\_cloudwatch\_log\_arn](#output\_lambda\_cloudwatch\_log\_arn) | n/a |
-| <a name="output_lambda_exec_role"></a> [lambda\_exec\_role](#output\_lambda\_exec\_role) | n/a |
-| <a name="output_lambda_exec_role_arn"></a> [lambda\_exec\_role\_arn](#output\_lambda\_exec\_role\_arn) | n/a |
-| <a name="output_lambda_name"></a> [lambda\_name](#output\_lambda\_name) | # (c) 2021-2025 Cloud Ops Works LLC - https://cloudops.works/ Find us on: GitHub: https://github.com/cloudopsworks WebSite: https://cloudops.works Distributed Under Apache v2.0 License |
-| <a name="output_lambda_security_group_id"></a> [lambda\_security\_group\_id](#output\_lambda\_security\_group\_id) | n/a |
-| <a name="output_lambda_security_group_name"></a> [lambda\_security\_group\_name](#output\_lambda\_security\_group\_name) | n/a |
+| <a name="output_lambda_arn"></a> [lambda\_arn](#output\_lambda\_arn) | ARN of the Secrets Manager rotation Lambda function. |
+| <a name="output_lambda_cloudwatch_log"></a> [lambda\_cloudwatch\_log](#output\_lambda\_cloudwatch\_log) | Name of the CloudWatch Logs group used by the rotation Lambda. |
+| <a name="output_lambda_cloudwatch_log_arn"></a> [lambda\_cloudwatch\_log\_arn](#output\_lambda\_cloudwatch\_log\_arn) | ARN of the CloudWatch Logs group used by the rotation Lambda. |
+| <a name="output_lambda_exec_role"></a> [lambda\_exec\_role](#output\_lambda\_exec\_role) | Name of the IAM execution role attached to the rotation Lambda. |
+| <a name="output_lambda_exec_role_arn"></a> [lambda\_exec\_role\_arn](#output\_lambda\_exec\_role\_arn) | ARN of the IAM execution role attached to the rotation Lambda. |
+| <a name="output_lambda_name"></a> [lambda\_name](#output\_lambda\_name) | Name of the Secrets Manager rotation Lambda function. |
+| <a name="output_lambda_security_group_id"></a> [lambda\_security\_group\_id](#output\_lambda\_security\_group\_id) | ID of the security group created for the rotation Lambda when VPC mode is enabled and create\_security\_group is true. |
+| <a name="output_lambda_security_group_name"></a> [lambda\_security\_group\_name](#output\_lambda\_security\_group\_name) | Name of the security group created for the rotation Lambda when VPC mode is enabled and create\_security\_group is true. |
 
 
 
