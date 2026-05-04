@@ -1,1 +1,37 @@
 # Module configuration
+settings:
+  type: postgres # (Required) Database engine used by the rotation Lambda. Valid values: postgres, mysql, mariadb, mssql, mongodb, mongodbatlas, oracle, db2.
+  description: "Secrets rotation lambda for the primary application database" # (Optional) Custom Lambda description. Default: Terraform builds one from type and multi_user.
+  multi_user: false # (Optional) Enable alternating-users rotation strategy. Default: false.
+  timeout: 60 # (Optional) Lambda timeout in seconds. Default: 60.
+  memory_size: 128 # (Optional) Lambda memory size in MB. Default: 128.
+  password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
+  log_retention_days: 14 # (Optional) CloudWatch Logs retention in days. Default: 14.
+  logging: # (Optional) Lambda advanced logging configuration.
+    log_format: JSON # (Optional) Log output format. Valid values: JSON, Text. Default: JSON.
+    application_log_level: INFO # (Optional) Application log threshold. Valid values: TRACE, DEBUG, INFO, WARN, ERROR, FATAL.
+    system_log_level: INFO # (Optional) System log threshold. Valid values: DEBUG, INFO, WARN.
+  environment: # (Optional) Additional Lambda environment variables.
+    variables:
+      - name: EXTRA_CA_CERTS # (Required) Environment variable name.
+        value: /opt/certs/custom-ca.pem # (Required) Environment variable value.
+  allowed_secrets: # (Optional) Additional Secrets Manager secret ARNs the rotation function may read and update.
+    - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/postgres-credentials-AbCdEf
+  allowed_kms: # (Optional) KMS key ARNs used to decrypt the allowed secrets.
+    - arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
+  iam: # (Optional) Additional IAM policy statements to attach to the Lambda execution role.
+    statements:
+      - effect: Allow # (Required) IAM statement effect.
+        action: # (Required) IAM actions to allow or deny.
+          - rds-db:connect
+        resource: # (Required) ARNs the statement applies to.
+          - arn:aws:rds-db:us-east-1:111122223333:dbuser:db-ABCDEFGHIJKLMNOP/app_user
+
+vpc:
+  enabled: false # (Optional) Attach the Lambda function to a VPC. Default: false.
+  subnets: # (Required when vpc.enabled is true) Private subnet IDs for Lambda ENIs.
+    - subnet-0123456789abcdef0
+    - subnet-0fedcba9876543210
+  create_security_group: true # (Optional) Create a dedicated security group for the Lambda. Default: false.
+  security_groups: # (Required when vpc.enabled is true and create_security_group is false) Existing security group IDs to attach.
+    - sg-0123456789abcdef0

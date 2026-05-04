@@ -10,7 +10,7 @@
 
 | Name | Version |
 |------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.4 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.26.0 |
 | <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
 
 ## Modules
@@ -61,11 +61,11 @@
 
 | Name | Description |
 |------|-------------|
-| <a name="output_lambda_arn"></a> [lambda\_arn](#output\_lambda\_arn) | n/a |
-| <a name="output_lambda_cloudwatch_log"></a> [lambda\_cloudwatch\_log](#output\_lambda\_cloudwatch\_log) | n/a |
-| <a name="output_lambda_cloudwatch_log_arn"></a> [lambda\_cloudwatch\_log\_arn](#output\_lambda\_cloudwatch\_log\_arn) | n/a |
-| <a name="output_lambda_exec_role"></a> [lambda\_exec\_role](#output\_lambda\_exec\_role) | n/a |
-| <a name="output_lambda_exec_role_arn"></a> [lambda\_exec\_role\_arn](#output\_lambda\_exec\_role\_arn) | n/a |
-| <a name="output_lambda_name"></a> [lambda\_name](#output\_lambda\_name) | # (c) 2021-2025 Cloud Ops Works LLC - https://cloudops.works/ Find us on: GitHub: https://github.com/cloudopsworks WebSite: https://cloudops.works Distributed Under Apache v2.0 License |
-| <a name="output_lambda_security_group_id"></a> [lambda\_security\_group\_id](#output\_lambda\_security\_group\_id) | n/a |
-| <a name="output_lambda_security_group_name"></a> [lambda\_security\_group\_name](#output\_lambda\_security\_group\_name) | n/a |
+| <a name="output_lambda_arn"></a> [lambda\_arn](#output\_lambda\_arn) | ARN of the Secrets Manager rotation Lambda function. |
+| <a name="output_lambda_cloudwatch_log"></a> [lambda\_cloudwatch\_log](#output\_lambda\_cloudwatch\_log) | Name of the CloudWatch Logs group used by the rotation Lambda. |
+| <a name="output_lambda_cloudwatch_log_arn"></a> [lambda\_cloudwatch\_log\_arn](#output\_lambda\_cloudwatch\_log\_arn) | ARN of the CloudWatch Logs group used by the rotation Lambda. |
+| <a name="output_lambda_exec_role"></a> [lambda\_exec\_role](#output\_lambda\_exec\_role) | Name of the IAM execution role attached to the rotation Lambda. |
+| <a name="output_lambda_exec_role_arn"></a> [lambda\_exec\_role\_arn](#output\_lambda\_exec\_role\_arn) | ARN of the IAM execution role attached to the rotation Lambda. |
+| <a name="output_lambda_name"></a> [lambda\_name](#output\_lambda\_name) | Name of the Secrets Manager rotation Lambda function. |
+| <a name="output_lambda_security_group_id"></a> [lambda\_security\_group\_id](#output\_lambda\_security\_group\_id) | ID of the security group created for the rotation Lambda when VPC mode is enabled and create\_security\_group is true. |
+| <a name="output_lambda_security_group_name"></a> [lambda\_security\_group\_name](#output\_lambda\_security\_group\_name) | Name of the security group created for the rotation Lambda when VPC mode is enabled and create\_security\_group is true. |
