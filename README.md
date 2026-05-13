@@ -57,53 +57,31 @@ Instead pin to the release tag (e.g. `?ref=vX.Y.Z`) of one of our [latest releas
 Bootstrap a new Terragrunt unit with Terragrunt scaffold, then fill in the generated `inputs.yaml`.
 
 ```bash
-terragrunt scaffold \
-  github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup//.boilerplate \
-  --var="sourceUrl=git::https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.git//?ref=v1.4.0"
+# 1. Create and enter the target deployment directory
+mkdir -p <environment>/<region>/<spoke>/secrets-rotation
+cd <environment>/<region>/<spoke>/secrets-rotation
+
+# 2. Scaffold the module — prompts for VPC module wiring options
+terragrunt scaffold github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup
+
+# 3. Edit inputs.yaml with deployment-specific values
+vi inputs.yaml
+
+# 4. Apply
+terragrunt apply
 ```
 
-Example generated `inputs.yaml`:
+During scaffolding you are prompted for:
 
-```yaml
-settings:
-  type: postgres # (Required) Database engine used by the rotation Lambda. Valid values: postgres, mysql, mariadb, mssql, mongodb, mongodbatlas, oracle, db2.
-  description: "Secrets rotation lambda for the primary application database" # (Optional) Custom Lambda description. Default: Terraform builds one from type and multi_user.
-  multi_user: false # (Optional) Enable alternating-users rotation strategy. Default: false.
-  timeout: 60 # (Optional) Lambda timeout in seconds. Default: 60.
-  memory_size: 256 # (Optional) Lambda memory size in MB. Default: 128.
-  password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
-  log_retention_days: 14 # (Optional) CloudWatch Logs retention in days. Default: 14.
-  logging: # (Optional) Lambda advanced logging configuration.
-    log_format: JSON # (Optional) Log output format. Valid values: JSON, Text. Default: JSON.
-    application_log_level: INFO # (Optional) Application log threshold. Valid values: TRACE, DEBUG, INFO, WARN, ERROR, FATAL.
-    system_log_level: INFO # (Optional) System log threshold. Valid values: DEBUG, INFO, WARN.
-  environment: # (Optional) Additional Lambda environment variables.
-    variables:
-      - name: EXTRA_CA_CERTS # (Required) Environment variable name.
-        value: /opt/certs/custom-ca.pem # (Required) Environment variable value.
-  allowed_secrets: # (Optional) Additional Secrets Manager secret ARNs the rotation function may read and update.
-    - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/postgres-credentials-AbCdEf
-  allowed_kms: # (Optional) KMS key ARNs used to decrypt the allowed secrets.
-    - arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
-  iam: # (Optional) Additional IAM policy statements to attach to the Lambda execution role.
-    statements:
-      - effect: Allow # (Required) IAM statement effect.
-        action: # (Required) IAM actions to allow or deny.
-          - rds-db:connect
-        resource: # (Required) ARNs the statement applies to.
-          - arn:aws:rds-db:us-east-1:111122223333:dbuser:db-ABCDEFGHIJKLMNOP/app_user
+| Variable             | Default    | Description                                                                    |
+|----------------------|------------|--------------------------------------------------------------------------------|
+| `vpc_module_enabled` | `true`     | Wire subnets from a sibling VPC Terragrunt module dependency                   |
+| `vpc_module_path`    | `../vpc`   | Relative path to the VPC module unit (only when `vpc_module_enabled` is `true`)|
+| `vpc_subnet_type`    | `private`  | Which VPC subnet set to use: `private`, `intra`, or `database`                 |
 
-vpc:
-  enabled: true # (Optional) Attach the Lambda function to a VPC. Default: false.
-  subnets: # (Required when vpc.enabled is true) Private subnet IDs for Lambda ENIs.
-    - subnet-0123456789abcdef0
-    - subnet-0fedcba9876543210
-  create_security_group: true # (Optional) Create a dedicated security group for the Lambda. Default: false.
-  security_groups: # (Required when vpc.enabled is true and create_security_group is false) Existing security group IDs to attach.
-    - sg-0123456789abcdef0
-```
+**With VPC module dependency injection (`vpc_module_enabled = true`, default)**
 
-Example generated `terragrunt.hcl`:
+The generated `terragrunt.hcl` wires subnets directly from the VPC dependency — no subnet IDs in `inputs.yaml`:
 
 ```hcl
 locals {
@@ -132,8 +110,43 @@ include "root" {
   path = find_in_parent_folders("root.hcl")
 }
 
+dependency "vpc" {
+  config_path = "../vpc"
+  mock_outputs_allowed_terraform_commands = ["validate", "destroy"]
+  mock_outputs = {
+    database_subnets = ["subnet-abcdef123456789", "subnet-abcdef123456781", "subnet-abcdef123456782"]
+    private_subnets  = ["subnet-01234567890123456", "subnet-01234567890123457", "subnet-01234567890123458"]
+    intra_subnets    = ["subnet-01234567890123456", "subnet-01234567890123457"]
+    vpc_id           = "vpc-12345678901234"
+    vpc_cidr_block   = "1.0.0.0/8"
+  }
+}
+
 terraform {
-  source = "git::https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.git//?ref=v1.4.0"
+  source = "git::https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.git//?ref=v1.6.28"
+}
+
+inputs = {
+  is_hub     = false
+  org        = local.env_vars.org
+  spoke_def  = local.spoke_vars.spoke
+  settings   = local.local_vars.settings
+  vpc = {
+    enabled               = true
+    subnets               = dependency.vpc.outputs.private_subnets
+    create_security_group = true
+  }
+  extra_tags = local.tags
+}
+```
+
+**Without VPC module dependency (`vpc_module_enabled = false`)**
+
+When scaffolding without a VPC module, `vpc` is read from `inputs.yaml`:
+
+```hcl
+terraform {
+  source = "git::https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.git//?ref=v1.6.28"
 }
 
 inputs = {
@@ -146,17 +159,61 @@ inputs = {
 }
 ```
 
+Example `inputs.yaml`:
+
+```yaml
+settings:
+  type: postgres # (Required) Database engine used by the rotation Lambda. Valid values: postgres, mysql, mariadb, mssql, mongodb, mongodbatlas, oracle, db2.
+  description: "Secrets rotation lambda for the primary application database" # (Optional) Custom Lambda description. Default: Terraform builds one from type and multi_user.
+  multi_user: false # (Optional) Enable alternating-users rotation strategy. Default: false.
+  timeout: 60 # (Optional) Lambda timeout in seconds. Default: 60.
+  memory_size: 128 # (Optional) Lambda memory size in MB. Default: 128.
+  password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
+  log_retention_days: 14 # (Optional) CloudWatch Logs retention in days. Default: 14.
+  logging: # (Optional) Lambda advanced logging configuration.
+    log_format: JSON # (Optional) Log output format. Valid values: JSON, Text. Default: JSON.
+    application_log_level: INFO # (Optional) Application log threshold. Valid values: TRACE, DEBUG, INFO, WARN, ERROR, FATAL.
+    system_log_level: INFO # (Optional) System log threshold. Valid values: DEBUG, INFO, WARN.
+  environment: # (Optional) Additional Lambda environment variables.
+    variables:
+      - name: EXTRA_CA_CERTS # (Required) Environment variable name.
+        value: /opt/certs/custom-ca.pem # (Required) Environment variable value.
+  allowed_secrets: # (Optional) Additional Secrets Manager secret ARNs the rotation function may read and update.
+    - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/postgres-credentials-AbCdEf
+  allowed_kms: # (Optional) KMS key ARNs used to decrypt the allowed secrets.
+    - arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
+  iam: # (Optional) Additional IAM policy statements to attach to the Lambda execution role.
+    statements:
+      - effect: Allow # (Required) IAM statement effect.
+        action: # (Required) IAM actions to allow or deny.
+          - rds-db:connect
+        resource: # (Required) ARNs the statement applies to.
+          - arn:aws:rds-db:us-east-1:111122223333:dbuser:db-ABCDEFGHIJKLMNOP/app_user
+
+vpc:
+  enabled: false # (Optional) Attach the Lambda function to a VPC. Default: false.
+  subnets: # (Required when vpc.enabled is true) Private subnet IDs for Lambda ENIs.
+    - subnet-0123456789abcdef0
+    - subnet-0fedcba9876543210
+  create_security_group: true # (Optional) Create a dedicated security group for the Lambda. Default: false.
+  security_groups: # (Required when vpc.enabled is true and create_security_group is false) Existing security group IDs to attach.
+    - sg-0123456789abcdef0
+```
+
 ## Quick Start
 
-1. Scaffold the unit with Terragrunt:
+1. Create and enter the target deployment directory:
    ```bash
-   terragrunt scaffold \
-     github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup//.boilerplate \
-     --var="sourceUrl=git::https://github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup.git//?ref=v1.4.0"
+   mkdir -p <environment>/<region>/<spoke>/secrets-rotation
+   cd <environment>/<region>/<spoke>/secrets-rotation
    ```
-2. Update `inputs.yaml` with your engine type, secret access, and optional VPC settings.
-3. Review the generated `terragrunt.hcl` and pin `sourceUrl` to the release you want to consume.
-4. Run `terragrunt hcl fmt`, then `terragrunt plan` and `terragrunt apply` from the new unit directory.
+2. Scaffold the module:
+   ```bash
+   terragrunt scaffold github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup
+   ```
+3. Answer the scaffold prompts (`vpc_module_enabled`, `vpc_module_path`, `vpc_subnet_type`) to configure VPC dependency injection.
+4. Edit `inputs.yaml` — set `settings.type` to your database engine, configure `allowed_secrets` and `allowed_kms`, and adjust `vpc` settings if not using module injection.
+5. Run `terragrunt hcl fmt`, then `terragrunt plan` and `terragrunt apply` from the unit directory.
 
 
 ## Examples
@@ -222,7 +279,7 @@ Available targets:
 
 | Name | Version |
 |------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.4 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.26.0 |
 | <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
 
 ## Modules

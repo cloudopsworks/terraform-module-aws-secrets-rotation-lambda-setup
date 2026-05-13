@@ -23,7 +23,32 @@ locals {
 include "root" {
   path = find_in_parent_folders("{{ .RootFileName }}")
 }
-
+{{ if .vpc_module_enabled }}
+dependency "vpc" {
+  config_path = "{{ .vpc_module_path }}"
+  # Configure mock outputs for the `validate` command that are returned when there are no outputs available (e.g the
+  # module hasn't been applied yet.
+  mock_outputs_allowed_terraform_commands = ["validate", "destroy"]
+  mock_outputs = {
+    database_subnets = [
+      "subnet-abcdef123456789",
+      "subnet-abcdef123456781",
+      "subnet-abcdef123456782",
+    ]
+    private_subnets = [
+      "subnet-01234567890123456",
+      "subnet-01234567890123457",
+      "subnet-01234567890123458",
+    ]
+    intra_subnets = [
+      "subnet-01234567890123456",
+      "subnet-01234567890123457",
+    ]
+    vpc_id         = "vpc-12345678901234"
+    vpc_cidr_block = "1.0.0.0/8"
+  }
+}
+{{ end }}
 terraform {
   source = "{{ .sourceUrl }}"
 }
@@ -39,7 +64,16 @@ inputs = {
   {{- end }}
   {{- range .optionalVariables }}
   {{- if not (eq .Name "extra_tags" "is_hub" "spoke_def" "org") }}
+  {{- if and $.vpc_module_enabled (eq .Name "vpc") }}
+  vpc = {
+    enabled = true
+    vpc_id  = dependency.vpc.outputs.vpc_id
+    subnets = dependency.vpc.outputs.{{ $.vpc_subnet_type }}_subnets
+    create_security_group = true
+  }
+  {{- else }}
   {{ .Name }} = try(local.local_vars.{{ .Name }}, {{ .DefaultValue }})
+  {{- end }}
   {{- end }}
   {{- end }}
   extra_tags = local.tags
