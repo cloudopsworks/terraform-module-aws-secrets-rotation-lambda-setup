@@ -1,4 +1,7 @@
 # Module configuration
+# NOTE: When scaffolded with vpc_module_enabled=true (default), the vpc block in the generated
+# terragrunt.hcl is auto-wired from the VPC module dependency — the vpc section below is not used.
+# Set vpc_module_enabled=false during scaffold to supply vpc inputs manually from this file.
 settings:
   type: postgres # (Required) Database engine used by the rotation Lambda. Valid values: postgres, mysql, mariadb, mssql, mongodb, mongodbatlas, oracle, db2.
   description: "Secrets rotation lambda for the primary application database" # (Optional) Custom Lambda description. Default: Terraform builds one from type and multi_user.
@@ -27,6 +30,8 @@ settings:
         resource: # (Required) ARNs the statement applies to.
           - arn:aws:rds-db:us-east-1:111122223333:dbuser:db-ABCDEFGHIJKLMNOP/app_user
 
+# VPC configuration — only used when vpc_module_enabled=false during scaffold.
+# When vpc_module_enabled=true (default), subnets are sourced from the VPC dependency block.
 vpc:
   enabled: false # (Optional) Attach the Lambda function to a VPC. Default: false.
   subnets: # (Required when vpc.enabled is true) Private subnet IDs for Lambda ENIs.

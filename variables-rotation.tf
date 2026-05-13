@@ -9,22 +9,32 @@
 
 ## YAML Specification Settings
 # settings:
-#   description: "<description>" # (optional) Description of the Lambda function
-#   type: mongodb | postgres | mysql | mariadb | mssql | mongodbatlas
-#   multi_user: true | false # Defaults to false
-#   timeout: 30 # (optional) Timeout in seconds, defaults to 60
-#   memory_size: 128 # (optional) Memory size in MB, defaults to 128
-#   password_length: 30 # Defaults to 30, and must be greater than 24
-#   logging:       # (optional) Logging settings
-#     log_format: JSON | TEXT # Defaults to json
-#     application_log_level: INFO | DEBUG | ERROR # Defaults to INFO
-#     system_log_level: INFO | DEBUG | ERROR # Defaults to INFO
-#   environment:
+#   type: postgres | mysql | mariadb | mssql | mongodb | mongodbatlas | oracle | db2  # (Required) Database engine used by the rotation Lambda.
+#   description: "<description>"  # (Optional) Custom Lambda description. Default: Terraform builds one from type and multi_user.
+#   multi_user: true | false      # (Optional) Enable alternating-users rotation strategy. Default: false.
+#   timeout: 60                   # (Optional) Lambda timeout in seconds. Default: 60.
+#   memory_size: 128              # (Optional) Lambda memory size in MB. Default: 128.
+#   password_length: 30           # (Optional) Generated password length. Default: 30. Must be >= 24.
+#   log_retention_days: 14        # (Optional) CloudWatch Logs retention in days. Default: 14.
+#   logging:                      # (Optional) Lambda advanced logging configuration.
+#     log_format: JSON | Text     # (Optional) Log output format. Default: JSON.
+#     application_log_level: TRACE | DEBUG | INFO | WARN | ERROR | FATAL  # (Optional) Application log threshold. Default: INFO.
+#     system_log_level: DEBUG | INFO | WARN  # (Optional) System log threshold. Default: INFO.
+#   environment:                  # (Optional) Additional Lambda environment variables.
 #     variables:
-#       - name: ANOTHER_ENV_VAR
-#         value: some_value
-#       - name: ANOTHER_ENV_VAR2
-#         value: some_value2
+#       - name: VAR_NAME          # (Required) Environment variable name.
+#         value: var_value        # (Required) Environment variable value.
+#   allowed_secrets:              # (Optional) Secrets Manager secret ARNs the rotation function may read and update.
+#     - arn:aws:secretsmanager:<region>:<account>:secret:<name>
+#   allowed_kms:                  # (Optional) KMS key ARNs used to decrypt the allowed secrets.
+#     - arn:aws:kms:<region>:<account>:key/<key-id>
+#   iam:                          # (Optional) Additional IAM policy statements to attach to the Lambda execution role.
+#     statements:
+#       - effect: Allow | Deny    # (Required) IAM statement effect.
+#         action:                 # (Required) IAM actions to allow or deny.
+#           - <service:action>
+#         resource:               # (Required) ARNs the statement applies to.
+#           - <arn>
 variable "settings" {
   description = "Settings for the module"
   type        = any
@@ -33,11 +43,11 @@ variable "settings" {
 
 ## VPC Settings yaml Specification
 # vpc:
-#   enabled: true | false # Defaults to false
-#   subnet_ids: # (optional) List of subnet IDs to attach to the Lambda function
+#   enabled: true | false              # (Optional) Attach the Lambda function to a VPC. Default: false.
+#   subnets:                           # (Required when vpc.enabled is true) Private subnet IDs for Lambda ENIs.
 #     - subnet-12345678
-#   create_security_group: true | false # (optional) Defaults to false, required if security_groups are not provided
-#   security_groups: # (optional) List of security groups to attach to the Lambda function, required if create_security_group is false
+#   create_security_group: true | false # (Optional) Create a dedicated security group for the Lambda. Default: false.
+#   security_groups:                   # (Required when vpc.enabled is true and create_security_group is false) Existing SG IDs to attach.
 #     - sg-12345678
 variable "vpc" {
   description = "VPC settings for the module"
