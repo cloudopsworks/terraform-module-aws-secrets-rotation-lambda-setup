@@ -20,6 +20,25 @@ variables:
     type: map
     default: {}
   # End - Generic Boilerplate Variables Setup
+  - name: vpc_module_enabled
+    order: 2
+    description: "Is the VPC module enabled?"
+    type: bool
+    default: true
+  - name: vpc_module_path
+    order: 3
+    description: "Path to the VPC module, required if vpc_module_enabled is true"
+    type: string
+    default: "../vpc"
+  - name: vpc_subnet_type
+    order: 4
+    description: "Subnet type for the VPC module (e.g., public, private, isolated)"
+    type: enum
+    default: private
+    options:
+      - private
+      - intra
+      - database
 
 hooks:
   after:
