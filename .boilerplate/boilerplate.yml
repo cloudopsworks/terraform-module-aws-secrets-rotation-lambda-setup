@@ -14,22 +14,26 @@ variables:
     description: "Is this a hub configuration?"
     type: bool
     default: false
+    confirm: true
   - name: tags
     order: 1
     description: "Tags"
     type: map
     default: {}
+    confirm: true
   # End - Generic Boilerplate Variables Setup
   - name: vpc_module_enabled
     order: 2
     description: "Is the VPC module enabled?"
     type: bool
     default: true
+    confirm: true
   - name: vpc_module_path
     order: 3
     description: "Path to the VPC module, required if vpc_module_enabled is true"
     type: string
     default: "../vpc"
+    confirm: true
   - name: vpc_subnet_type
     order: 4
     description: "Subnet type for the VPC module (e.g., public, private, isolated)"
@@ -39,6 +43,7 @@ variables:
       - private
       - intra
       - database
+    confirm: true
 
 hooks:
   after:
