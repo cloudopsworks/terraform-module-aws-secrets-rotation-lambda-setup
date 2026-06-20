@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.30.3
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.37.0
 	go.mongodb.org/atlas-sdk/v20250312001 v20250312001.1.0
-	go.mongodb.org/mongo-driver/v2 v2.2.3
+	go.mongodb.org/mongo-driver/v2 v2.4.2
 )
 
 require (
