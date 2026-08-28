@@ -349,17 +349,21 @@ def set_secret(service_client, arn, token):
             # Only the validated identifier is templated into the statement; both
             # passwords are bound parameters and never appear in the query text.
             #
-            # The two statement-building lines below are suppressed for the SQL
-            # injection rules. T-SQL cannot bind an object name as a parameter, so
-            # ALTER LOGIN/USER has no parameterised form. The name reaching the
-            # template is quoted server-side by QUOTENAME and then re-checked by
+            # The two statement-building lines below carry SQL injection findings.
+            # T-SQL cannot bind an object name as a parameter, so ALTER LOGIN/USER has
+            # no parameterised form. The name reaching the template is quoted
+            # server-side by QUOTENAME and then re-checked by
             # validate_quoted_identifier, which rejects anything that is not a single
-            # bracket-quoted token; alter_object is chosen from two literals. The
-            # rules match on the syntax and cannot see either sanitiser.
+            # bracket-quoted token; alter_object is chosen from two literals. The rules
+            # match on the syntax and cannot see either sanitiser.
+            #
+            # The markers below are kept for accuracy, but note that the Semgrep PRO
+            # policy in use ignores nosemgrep, so these findings have to be triaged in
+            # the Semgrep AppSec Platform instead.
             alter_object = "LOGIN" if containment == 0 else "USER"
-            # nosemgrep
+            # nosemgrep: python.aws-lambda.security.tainted-sql-string.tainted-sql-string
             alter_stmt = "ALTER {} {} WITH PASSWORD = %s OLD_PASSWORD = %s".format(alter_object, escaped_username)
-            # nosemgrep
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.aws-lambda.security.pymssql-sqli.pymssql-sqli
             cursor.execute(alter_stmt, (pending_dict['password'], current_dict['password']))
 
             conn.commit()
