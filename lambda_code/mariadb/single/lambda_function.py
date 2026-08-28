@@ -5,14 +5,144 @@ import boto3
 import json
 import logging
 import os
+import re
 import pymysql
 import urllib.parse
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+try:
+    logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
+except ValueError:
+    logger.setLevel(logging.INFO)
+
+# Fields of a secret that are safe to name in a log line. Anything outside this
+# allow list -- passwords, tokens and the pre-built connection strings that embed
+# them -- never reaches the log stream.
+LOGGABLE_SECRET_FIELDS = ('engine', 'host', 'port', 'dbname', 'username', 'ssl', 'sslmode', 'schema')
+
+# Placeholder substituted for any credential-looking text.
+REDACTED = '***REDACTED***'
+
+# Maximum length of a single value copied into a log record.
+MAX_LOGGED_LENGTH = 512
+
+# Credential shapes that database drivers and the AWS SDK embed in their error
+# messages: URI user-info sections and key/value pairs.
+_URI_CREDENTIAL_RE = re.compile(r'(?i)(//[^/\s:@]+:)([^@\s/]+)(@)')
+# The negative lookbehind keeps ARN segments such as ":secret:my-secret-name"
+# readable: those identify the secret, they are not the credential.
+_KEY_VALUE_CREDENTIAL_RE = re.compile(
+    r'(?i)(?<!:)(password|passwd|pwd|secret|token|private_key)("?\s*[=:]\s*)("[^"]*"|\'[^\']*\'|[^\s;,&"\']+)'
+)
+
+# Characters that could forge a new log entry (CRLF) or corrupt the log stream.
+_CONTROL_CHARACTERS_RE = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def scrub(value):
+    """Renders a value as a string that is safe to write to the log stream
+
+    Credential-looking substrings are masked, control characters (which could be
+    used to forge log entries) are collapsed to spaces, and the result is
+    truncated so a hostile value cannot flood the log group.
+
+    Args:
+        value: Any value. Non-string values are rendered with str()
+
+    Returns:
+        string: The sanitized representation of the value
+
+    """
+    text = value if isinstance(value, str) else str(value)
+    text = _URI_CREDENTIAL_RE.sub(r'\1' + REDACTED + r'\3', text)
+    text = _KEY_VALUE_CREDENTIAL_RE.sub(r'\1\2' + REDACTED, text)
+    text = _CONTROL_CHARACTERS_RE.sub(' ', text)
+    if len(text) > MAX_LOGGED_LENGTH:
+        text = text[:MAX_LOGGED_LENGTH] + '...(truncated)'
+    return text
+
+
+def mask_identifier(value):
+    """Shortens an opaque identifier so log lines stay correlatable without publishing it
+
+    Args:
+        value: The identifier, typically a secret version id or rotation token
+
+    Returns:
+        string: The leading characters of the identifier followed by an ellipsis
+
+    """
+    text = scrub(value)
+    if len(text) <= 8:
+        return REDACTED
+    return '%s...' % text[:8]
+
+
+def safe_connection_info(secret_dict):
+    """Builds a log-safe description of a connection target
+
+    Only the allow-listed, non-credential fields are copied out of the secret, so
+    neither the password nor a pre-built connection string can reach the log
+    stream through this value.
+
+    Args:
+        secret_dict (dict): The Secret Dictionary
+
+    Returns:
+        dict: The allow-listed connection fields, sanitized for logging
+
+    """
+    return {field: scrub(secret_dict[field]) for field in LOGGABLE_SECRET_FIELDS if field in secret_dict}
+
+
+class RedactingFilter(logging.Filter):
+    """Scrubs every log record as a last line of defence
+
+    Call sites sanitize their own arguments; this filter additionally covers
+    records emitted by the AWS SDK and by the database driver, which may carry
+    connection URIs containing credentials.
+
+    """
+
+    def filter(self, record):
+        record.msg = scrub(record.msg)
+        if isinstance(record.args, dict):
+            record.args = {key: scrub(value) if isinstance(value, str) else value for key, value in record.args.items()}
+        elif record.args:
+            record.args = tuple(scrub(arg) if isinstance(arg, str) else arg for arg in record.args)
+        return True
+
+
+_redacting_filter = RedactingFilter()
+logger.addFilter(_redacting_filter)
+for _handler in logger.handlers:
+    _handler.addFilter(_redacting_filter)
 
 
 def lambda_handler(event, context):
+    """Entry point for the rotation Lambda
+
+    Delegates to rotate_secret and re-raises any failure without its original
+    message, so that a driver or SDK error carrying a connection URI is never
+    printed by the Lambda runtime. The sanitized detail is logged instead.
+
+    Args:
+        event (dict): Lambda dictionary of event parameters
+
+        context (LambdaContext): The Lambda runtime information
+
+    Raises:
+        RuntimeError: If any rotation step fails
+
+    """
+    try:
+        return rotate_secret(event, context)
+    except Exception as error:
+        logger.error("lambda_handler: Rotation failed with %s: %s" % (error.__class__.__name__, scrub(error)))
+        raise RuntimeError("Rotation failed with %s, see the function log for details" % error.__class__.__name__) from None
+
+
+def rotate_secret(event, context):
     """Secrets Manager RDS MariaDB Handler
 
     This handler uses the single-user rotation scheme to rotate an RDS MariaDB user credential. This rotation scheme
@@ -55,18 +185,18 @@ def lambda_handler(event, context):
     # Make sure the version is staged correctly
     metadata = service_client.describe_secret(SecretId=arn)
     if "RotationEnabled" in metadata and not metadata['RotationEnabled']:
-        logger.error("Secret %s is not enabled for rotation" % arn)
-        raise ValueError("Secret %s is not enabled for rotation" % arn)
+        logger.error("Secret %s is not enabled for rotation" % scrub(arn))
+        raise ValueError("Secret %s is not enabled for rotation" % scrub(arn))
     versions = metadata['VersionIdsToStages']
     if token not in versions:
-        logger.error("Secret version %s has no stage for rotation of secret %s." % (token, arn))
-        raise ValueError("Secret version %s has no stage for rotation of secret %s." % (token, arn))
+        logger.error("Secret version %s has no stage for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
+        raise ValueError("Secret version %s has no stage for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
     if "AWSCURRENT" in versions[token]:
-        logger.info("Secret version %s already set as AWSCURRENT for secret %s." % (token, arn))
+        logger.info("Secret version %s already set as AWSCURRENT for secret %s." % (mask_identifier(token), scrub(arn)))
         return
     elif "AWSPENDING" not in versions[token]:
-        logger.error("Secret version %s not set as AWSPENDING for rotation of secret %s." % (token, arn))
-        raise ValueError("Secret version %s not set as AWSPENDING for rotation of secret %s." % (token, arn))
+        logger.error("Secret version %s not set as AWSPENDING for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
+        raise ValueError("Secret version %s not set as AWSPENDING for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
 
     # Call the appropriate step
     if step == "createSecret":
@@ -82,8 +212,8 @@ def lambda_handler(event, context):
         finish_secret(service_client, arn, token)
 
     else:
-        logger.error("lambda_handler: Invalid step parameter %s for secret %s" % (step, arn))
-        raise ValueError("Invalid step parameter %s for secret %s" % (step, arn))
+        logger.error("lambda_handler: Invalid step parameter %s for secret %s" % (scrub(step), scrub(arn)))
+        raise ValueError("Invalid step parameter %s for secret %s" % (scrub(step), scrub(arn)))
 
 
 def create_secret(service_client, arn, token):
@@ -111,7 +241,7 @@ def create_secret(service_client, arn, token):
     # Now try to get the secret version, if that fails, put a new secret
     try:
         get_secret_dict(service_client, arn, "AWSPENDING", token)
-        logger.info("createSecret: Successfully retrieved secret for %s." % arn)
+        logger.info("createSecret: Successfully retrieved secret for %s." % scrub(arn))
     except service_client.exceptions.ResourceNotFoundException:
         # Generate a random password
         random_pass = get_random_password(service_client)
@@ -121,7 +251,7 @@ def create_secret(service_client, arn, token):
             current_dict['connection_string'] = generate_connection_string(current_dict, random_pass)
         # Put the secret
         service_client.put_secret_value(SecretId=arn, ClientRequestToken=token, SecretString=json.dumps(current_dict), VersionStages=['AWSPENDING'])
-        logger.info("createSecret: Successfully put secret for ARN %s and version %s." % (arn, token))
+        logger.info("createSecret: Successfully put secret for ARN %s and version %s." % (scrub(arn), mask_identifier(token)))
 
 
 def set_secret(service_client, arn, token):
@@ -157,18 +287,18 @@ def set_secret(service_client, arn, token):
     conn = get_connection(pending_dict)
     if conn:
         conn.close()
-        logger.info("setSecret: AWSPENDING secret is already set as password in MariaDB DB for secret arn %s." % arn)
+        logger.info("setSecret: AWSPENDING secret is already set as password in MariaDB DB for secret arn %s." % scrub(arn))
         return
 
     # Make sure the user from current and pending match
     if current_dict['username'] != pending_dict['username']:
-        logger.error("setSecret: Attempting to modify user %s other than current user %s" % (pending_dict['username'], current_dict['username']))
-        raise ValueError("Attempting to modify user %s other than current user %s" % (pending_dict['username'], current_dict['username']))
+        logger.error("setSecret: Attempting to modify user %s other than current user %s" % (scrub(pending_dict['username']), scrub(current_dict['username'])))
+        raise ValueError("Attempting to modify user %s other than current user %s" % (scrub(pending_dict['username']), scrub(current_dict['username'])))
 
     # Make sure the host from current and pending match
     if current_dict['host'] != pending_dict['host']:
-        logger.error("setSecret: Attempting to modify user for host %s other than current host %s" % (pending_dict['host'], current_dict['host']))
-        raise ValueError("Attempting to modify user for host %s other than current host %s" % (pending_dict['host'], current_dict['host']))
+        logger.error("setSecret: Attempting to modify user for host %s other than current host %s" % (scrub(pending_dict['host']), scrub(current_dict['host'])))
+        raise ValueError("Attempting to modify user for host %s other than current host %s" % (scrub(pending_dict['host']), scrub(current_dict['host'])))
 
     # Now try the current password
     conn = get_connection(current_dict)
@@ -184,23 +314,25 @@ def set_secret(service_client, arn, token):
 
         # Make sure the user and host from previous and pending match
         if previous_dict['username'] != pending_dict['username']:
-            logger.error("setSecret: Attempting to modify user %s other than last valid user %s" % (pending_dict['username'], previous_dict['username']))
-            raise ValueError("Attempting to modify user %s other than last valid user %s" % (pending_dict['username'], previous_dict['username']))
+            logger.error("setSecret: Attempting to modify user %s other than last valid user %s" % (scrub(pending_dict['username']), scrub(previous_dict['username'])))
+            raise ValueError("Attempting to modify user %s other than last valid user %s" % (scrub(pending_dict['username']), scrub(previous_dict['username'])))
         if previous_dict['host'] != pending_dict['host']:
-            logger.error("setSecret: Attempting to modify user for host %s other than previous host %s" % (pending_dict['host'], previous_dict['host']))
-            raise ValueError("Attempting to modify user for host %s other than previous host %s" % (pending_dict['host'], previous_dict['host']))
+            logger.error("setSecret: Attempting to modify user for host %s other than previous host %s" % (scrub(pending_dict['host']), scrub(previous_dict['host'])))
+            raise ValueError("Attempting to modify user for host %s other than previous host %s" % (scrub(pending_dict['host']), scrub(previous_dict['host'])))
 
     # If we still don't have a connection, raise a ValueError
     if not conn:
-        logger.error("setSecret: Unable to log into database with previous, current, or pending secret of secret arn %s" % arn)
-        raise ValueError("Unable to log into database with previous, current, or pending secret of secret arn %s" % arn)
+        logger.error("setSecret: Unable to log into database with previous, current, or pending secret of secret arn %s" % scrub(arn))
+        raise ValueError("Unable to log into database with previous, current, or pending secret of secret arn %s" % scrub(arn))
 
     # Now set the password to the pending password
     try:
         with conn.cursor() as cur:
-            cur.execute("SET PASSWORD = PASSWORD(%s)", pending_dict['password'])
+            # Fixed statement with the password bound as a parameter, so the
+            # credential is never concatenated into query text.
+            cur.execute("SET PASSWORD = PASSWORD(%s)", (pending_dict['password'],))
             conn.commit()
-            logger.info("setSecret: Successfully set password for user %s in MariaDB DB for secret arn %s." % (pending_dict['username'], arn))
+            logger.info("setSecret: Successfully set password for user %s in MariaDB DB for secret arn %s." % (scrub(pending_dict['username']), scrub(arn)))
     finally:
         conn.close()
 
@@ -238,11 +370,11 @@ def test_secret(service_client, arn, token):
         finally:
             conn.close()
 
-        logger.info("testSecret: Successfully signed into MariaDB DB with AWSPENDING secret in %s." % arn)
+        logger.info("testSecret: Successfully signed into MariaDB DB with AWSPENDING secret in %s." % scrub(arn))
         return
     else:
-        logger.error("testSecret: Unable to log into database with pending secret of secret ARN %s" % arn)
-        raise ValueError("Unable to log into database with pending secret of secret ARN %s" % arn)
+        logger.error("testSecret: Unable to log into database with pending secret of secret ARN %s" % scrub(arn))
+        raise ValueError("Unable to log into database with pending secret of secret ARN %s" % scrub(arn))
 
 
 def finish_secret(service_client, arn, token):
@@ -265,7 +397,7 @@ def finish_secret(service_client, arn, token):
         if "AWSCURRENT" in metadata["VersionIdsToStages"][version]:
             if version == token:
                 # The correct version is already marked as current, return
-                logger.info("finishSecret: Version %s already marked as AWSCURRENT for %s" % (version, arn))
+                logger.info("finishSecret: Version %s already marked as AWSCURRENT for %s" % (mask_identifier(version), scrub(arn)))
                 return
             current_version = version
             break
@@ -273,7 +405,7 @@ def finish_secret(service_client, arn, token):
     # Finalize by staging the secret version current
     service_client.update_secret_version_stage(SecretId=arn, VersionStage="AWSCURRENT", MoveToVersionId=token, RemoveFromVersionId=current_version)
     service_client.update_secret_version_stage(SecretId=arn, VersionStage="AWSPENDING", RemoveFromVersionId=token)
-    logger.info("finishSecret: Successfully set AWSCURRENT stage to version %s for secret %s." % (token, arn))
+    logger.info("finishSecret: Successfully set AWSCURRENT stage to version %s for secret %s." % (mask_identifier(token), scrub(arn)))
 
 
 def get_connection(secret_dict):
@@ -375,11 +507,16 @@ def connect_and_authenticate(secret_dict, port, dbname, use_ssl):
     try:
         # Checks hostname and verifies server certificate implictly when 'ca' key is in 'ssl' dictionary
         conn = pymysql.connect(host=secret_dict['host'], user=secret_dict['username'], password=secret_dict['password'], port=port, database=dbname, connect_timeout=5, ssl=ssl)
-        logger.info("Successfully established %s connection as user '%s' with host: '%s'" % ("SSL/TLS" if use_ssl else "non SSL/TLS", secret_dict['username'], secret_dict['host']))
+        logger.info("Successfully established %s connection as user '%s' with host: '%s'" % ("SSL/TLS" if use_ssl else "non SSL/TLS", scrub(secret_dict['username']), scrub(secret_dict['host'])))
         return conn
     except pymysql.OperationalError as e:
-        if 'certificate verify failed: IP address mismatch' in e.args[1]:
-            logger.error("Hostname verification failed when estlablishing SSL/TLS Handshake with host: %s" % secret_dict['host'])
+        # The driver message is scrubbed before it is inspected or logged: pymysql
+        # can echo connection parameters back in the error text.
+        message = scrub(e)
+        if 'certificate verify failed: IP address mismatch' in message:
+            logger.error("Hostname verification failed when establishing SSL/TLS Handshake with host: %s" % scrub(secret_dict['host']))
+        else:
+            logger.warning("Unable to connect to database %s, Error is: %s %s" % (safe_connection_info(secret_dict), e.__class__.__name__, message))
         return None
 
 
@@ -473,41 +610,200 @@ def get_random_password(service_client):
     return passwd['RandomPassword']
 
 
-def generate_connection_string(secret_dict, new_password):
-    """Generates a connection string for the PostgreSQL database
+# Accepted values of the secret's 'connection_string_type' field, mapped to the
+# dialect that gets rendered. The driver specific names are kept as aliases so
+# that secrets already carrying them keep rotating.
+CONNECTION_STRING_TYPES = {
+    'jdbc': 'jdbc',
+    'dotnet': 'dotnet',
+    'odbc': 'odbc',
+    'go': 'go',
+    'gomysql': 'go',
+    'gomariadb': 'go',
+    'uri': 'uri',
+    'node': 'uri',
+    'nodejs': 'uri',
+    'python': 'uri',
+    'pymysql': 'uri',
+}
 
-    This helper function generates a connection string using the provided secret dictionary and new password.
+def quote_odbc_value(value):
+    """Quotes a value for an ODBC style ``Key=Value;`` connection string
+
+    ODBC requires a value that contains a delimiter or a leading/trailing space to
+    be enclosed in braces, with any closing brace inside it doubled. Without this a
+    password containing ``;`` would silently truncate the connection string.
+
+    Args:
+        value: The value to quote
+
+    Returns:
+        string: The value, braced when it needs to be
+
+    """
+    text = str(value)
+    if text != text.strip() or any(character in text for character in '[]{}(),;?*=!@'):
+        return '{%s}' % text.replace('}', '}}')
+    return text
+
+
+def quote_dotnet_value(value):
+    """Quotes a value for an ADO.NET style ``Key=Value;`` connection string
+
+    ADO.NET requires a value that contains a delimiter, a quote or a
+    leading/trailing space to be enclosed in double quotes, with any inner double
+    quote doubled.
+
+    Args:
+        value: The value to quote
+
+    Returns:
+        string: The value, quoted when it needs to be
+
+    """
+    text = str(value)
+    if text != text.strip() or any(character in text for character in ';\'"='):
+        return '"%s"' % text.replace('"', '""')
+    return text
+
+
+def build_property_string(parameters, quote_value):
+    """Renders ``Key=Value;`` pairs, skipping the ones that have no value
+
+    Skipping empties keeps optional settings out of the result instead of emitting
+    the string "None" for them.
+
+    Args:
+        parameters (list): (key, value) pairs in the order they should appear
+
+        quote_value (callable): The quoting function for the target dialect
+
+    Returns:
+        string: The rendered connection string
+
+    """
+    return ''.join('%s=%s;' % (key, quote_value(value)) for key, value in parameters if value is not None and str(value) != '')
+
+
+def build_query_string(parameters):
+    """Renders URL query parameters, skipping the ones that have no value
+
+    Args:
+        parameters (list): (key, value) pairs in the order they should appear
+
+    Returns:
+        string: The rendered query string, without the leading '?'
+
+    """
+    return '&'.join('%s=%s' % (key, urllib.parse.quote_plus(str(value))) for key, value in parameters if value is not None and str(value) != '')
+
+
+def build_userinfo(username, password):
+    """Percent-encodes the ``user:password`` section of a connection URI
+
+    Both halves are encoded with no safe characters, so a credential containing
+    ``@``, ``:`` or ``/`` cannot break out of the user-info section. quote() is used
+    rather than quote_plus() because '+' is not decoded back to a space there.
+
+    Args:
+        username (string): The user name
+
+        password (string): The password
+
+    Returns:
+        string: The encoded 'user:password' pair
+
+    """
+    return '%s:%s' % (urllib.parse.quote(str(username), safe=''), urllib.parse.quote(str(password), safe=''))
+
+
+def generate_connection_string(secret_dict, new_password):
+    """Generates a connection string for the MariaDB database
+
+    This helper function generates a connection string using the provided secret
+    dictionary and the new password, in the dialect named by the secret's
+    'connection_string_type' field. TLS is taken from the same 'ssl' key that
+    get_ssl_config uses for the rotation connection, so the string cannot disagree
+    with how this function actually reaches the database.
 
     Args:
         secret_dict (dict): The Secret Dictionary containing connection details
         new_password (str): The new password to be included in the connection string
 
-    Uses secret_dict['connection_string_type'] to determine the format of the connection string. supported formats are:
-        - node-pg | psycopg | rustpg: Uses psycopg2 format
-        - jdbc: Uses JDBC format
-        - odbc: Uses ODBC format
-        - dotnet: Uses .NET format
-        - gopq: Uses GO pq format
+    Supported values of secret_dict['connection_string_type'] are:
+        - jdbc: MariaDB Connector/J URL, 'jdbc:mariadb://host:port/db?user=...'
+        - dotnet: MySqlConnector keyword string, 'Server=...;Port=...;'
+        - odbc: MariaDB ODBC keyword string, 'Driver={MariaDB ODBC 3.1 Driver};...'
+        - go | gomysql | gomariadb: go-sql-driver/mysql DSN,
+          'user:password@tcp(host:port)/db'
+        - uri | node | nodejs | python | pymysql: URI,
+          'mariadb://user:password@host:port/db'
 
     Returns:
         str: The generated connection string
-    """
-    # Precondition: Ensure the secret_dict contains the necessary keys
-    connection_string_type = secret_dict.get('connection_string_type')
-    logger.info("Generating connection string for secret: %s" % connection_string_type)
-    encoded_password = urllib.parse.quote_plus(new_password)
-    if connection_string_type == 'jdbc':
-        conn_string = f"jdbc:postgresql://{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?user={secret_dict['username']}&password={encoded_password}ssl=true&sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
-    elif connection_string_type == 'dotnet':
-        conn_string = f"Host={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};Username={secret_dict['username']};Password={encoded_password};SSL Mode={secret_dict.get('sslmode')};Search Path={secret_dict.get('schema', 'public')};"
-    elif connection_string_type == 'odbc':
-        conn_string = f"Driver={{PostgreSQL ODBC Driver(UNICODE)}};Server={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};UID={secret_dict['username']};PWD={encoded_password};sslmode={secret_dict.get('sslmode')};schema={secret_dict.get('schema', 'public')}"
-    elif connection_string_type == 'gopq':
-        conn_string = f"postgres://{secret_dict['username']}:{encoded_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
-    elif connection_string_type == 'node-pg' or connection_string_type == 'psycopg' or connection_string_type == 'rustpg':
-        conn_string = f"postgressql://{secret_dict['username']}:{encoded_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
-    else:
-        conn_string = "(connection string type not supported)"
-        logger.warning("Connection string type not supported! Supported types are: node-pg, psycopg, rustpg, jdbc, odbc, dotnet, gopq.")
 
-    return conn_string
+    Raises:
+        ValueError: If connection_string_type is missing or is not supported
+
+    """
+    connection_string_type = secret_dict.get('connection_string_type')
+    dialect = CONNECTION_STRING_TYPES.get(connection_string_type)
+    if dialect is None:
+        logger.error("Unsupported connection string type %s, supported types are: %s" % (scrub(connection_string_type), ', '.join(sorted(CONNECTION_STRING_TYPES))))
+        raise ValueError("Unsupported connection_string_type, refusing to overwrite the stored connection string")
+    logger.info("Generating %s connection string for a %s secret" % (dialect, scrub(connection_string_type)))
+
+    host = secret_dict['host']
+    port = secret_dict.get('port', 3306)
+    dbname = secret_dict.get('dbname') or ''
+    username = secret_dict['username']
+    use_ssl, _ = get_ssl_config(secret_dict)
+
+    if dialect == 'jdbc':
+        # MariaDB Connector/J spells its TLS levels differently from Connector/J
+        # for MySQL: 'trust' encrypts, 'disable' turns TLS off.
+        query = build_query_string([
+            ('user', username),
+            ('password', new_password),
+            ('sslMode', 'trust' if use_ssl else 'disable'),
+        ])
+        return "jdbc:mariadb://%s:%s/%s?%s" % (host, port, dbname, query)
+
+    if dialect == 'dotnet':
+        # MySqlConnector is the .NET driver used against both MySQL and MariaDB.
+        return build_property_string([
+            ('Server', host),
+            ('Port', port),
+            ('Database', dbname),
+            ('Uid', username),
+            ('Pwd', new_password),
+            ('SslMode', 'Required' if use_ssl else 'None'),
+        ], quote_dotnet_value)
+
+    if dialect == 'odbc':
+        # The MariaDB ODBC driver configures TLS through its SSLCA/SSLVERIFY
+        # keywords, which depend on where the CA bundle lives on the client. That
+        # is left to the consumer rather than guessed at here.
+        return "Driver={MariaDB ODBC 3.1 Driver};" + build_property_string([
+            ('Server', host),
+            ('Port', port),
+            ('Database', dbname),
+            ('User', username),
+            ('Password', new_password),
+        ], quote_odbc_value)
+
+    if dialect == 'go':
+        # MariaDB speaks the MySQL wire protocol, so go-sql-driver/mysql is the
+        # driver here too. Its DSN is not a URL: the user name and password are
+        # read literally up to the last '@', so they must not be percent-encoded.
+        query = build_query_string([
+            ('tls', 'true' if use_ssl else 'false'),
+            ('parseTime', 'true'),
+        ])
+        return "%s:%s@tcp(%s:%s)/%s?%s" % (username, new_password, host, port, dbname, query)
+
+    # Generic URI, accepted by the MariaDB Node.js connector, SQLAlchemy and the
+    # other URL based clients. TLS is left to the client here: the drivers
+    # disagree on how to spell it in a URI, and emitting one dialect's spelling
+    # would break the others.
+    return "mariadb://%s@%s:%s/%s" % (build_userinfo(username, new_password), host, port, dbname)

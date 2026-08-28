@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,6 +43,76 @@ var (
 	cfg aws.Config
 )
 
+// Placeholder substituted for any credential-looking text.
+const redacted = "***REDACTED***"
+
+// Maximum length of a single value copied into a log record.
+const maxLoggedLength = 512
+
+var (
+	// Credential shapes that the MongoDB driver, the Atlas SDK and the AWS SDK
+	// embed in their error messages: URI user-info sections and key/value pairs.
+	// RE2 has no lookbehind, so the character preceding the key is captured and
+	// re-emitted; that keeps ARN segments such as ":secret:my-secret-name"
+	// readable, since those identify the secret rather than the credential.
+	uriCredentialRe      = regexp.MustCompile(`(//[^/\s:@]+:)([^@\s/]+)(@)`)
+	keyValueCredentialRe = regexp.MustCompile(`(?i)(^|[^:])(password|passwd|pwd|secret|token|private_key)("?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;,&"']+)`)
+
+	// Characters that could forge a new log entry (CRLF) or corrupt the stream.
+	controlCharacterRe = regexp.MustCompile(`[\x00-\x1f\x7f]`)
+)
+
+// Scrub
+//
+// Renders a value as a string that is safe to write to the log stream.
+//
+//	Credential-looking substrings are masked, control characters (which could be
+//	used to forge log entries) are collapsed to spaces, and the result is
+//	truncated so a hostile value cannot flood the log group.
+//
+//	Args:
+//	    value (any): The value to render, typically an error or a string
+//
+//	Returns:
+//	    string: The sanitized representation of the value
+func Scrub(value any) string {
+	var text string
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		text = typed
+	case error:
+		text = typed.Error()
+	default:
+		text = fmt.Sprintf("%v", typed)
+	}
+	text = uriCredentialRe.ReplaceAllString(text, "${1}"+redacted+"${3}")
+	text = keyValueCredentialRe.ReplaceAllString(text, "${1}${2}${3}"+redacted)
+	text = controlCharacterRe.ReplaceAllString(text, " ")
+	if len(text) > maxLoggedLength {
+		text = text[:maxLoggedLength] + "...(truncated)"
+	}
+	return text
+}
+
+// MaskIdentifier
+//
+// Shortens an opaque identifier so log lines stay correlatable without publishing it.
+//
+//	Args:
+//	    value (string): The identifier, typically a secret version id or rotation token
+//
+//	Returns:
+//	    string: The leading characters of the identifier followed by an ellipsis
+func MaskIdentifier(value string) string {
+	text := Scrub(value)
+	if len(text) <= 8 {
+		return redacted
+	}
+	return text[:8] + "..."
+}
+
 // InitAWS
 //
 //	This function initializes the AWS SDK with the provided credentials.
@@ -55,7 +126,8 @@ func InitAWS() {
 	// Load AWS configuration
 	initConfig, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		log.Fatalf("unable to load SDK config, %v", err)
+		// Runs from init(), outside the scrubbing boundary of HandleRequest.
+		log.Fatalf("unable to load SDK config, %v", Scrub(err))
 	}
 	cfg = initConfig
 }
@@ -111,10 +183,6 @@ func InitMongoDBAtlas() (*admin.APIClient, error) {
 
 func init() {
 	InitAWS()
-}
-
-func EncodeString(value string) string {
-	return url.QueryEscape(value)
 }
 
 // CreateSecret
@@ -184,7 +252,7 @@ func CreateSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		}
 		jsonString := string(jsonMarshal)
 
-		log.Printf("createSecret: Creating secret for %v", arn)
+		log.Printf("createSecret: Creating secret for %v", Scrub(arn))
 		_, err = smClient.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
 			SecretId:           &arn,
 			ClientRequestToken: &token,
@@ -194,9 +262,9 @@ func CreateSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		if err != nil {
 			return fmt.Errorf("createSecret: Failed to put secret for %v: %w", arn, err)
 		}
-		log.Printf("createSecret: Successfully created secret for %v and version %v", arn, token)
+		log.Printf("createSecret: Successfully created secret for %v and version %v", Scrub(arn), MaskIdentifier(token))
 	} else {
-		log.Printf("createSecret: Successfully retrieved secret for %v", arn)
+		log.Printf("createSecret: Successfully retrieved secret for %v", Scrub(arn))
 	}
 	return nil
 }
@@ -252,7 +320,7 @@ func SetSecret(ctx context.Context, smClient *secretsmanager.Client, mongoAdmin 
 	if err != nil {
 		return fmt.Errorf("SetSecret: Failed to update user %v - %v : %w", username, projectName, err)
 	}
-	log.Printf("SetSecret: Successfully set secret for %v", arn)
+	log.Printf("SetSecret: Successfully set secret for %v", Scrub(arn))
 	return nil
 }
 
@@ -283,11 +351,17 @@ func TestSecret(ctx context.Context, smClient *secretsmanager.Client, mongoAdmin
 		return fmt.Errorf("TestSecret: Failed to get connection for %v: %w", arn, err)
 	}
 
-	err = conn.Ping(context.TODO(), nil)
+	defer func() {
+		if disconnectErr := conn.Disconnect(ctx); disconnectErr != nil {
+			log.Printf("TestSecret: Failed to disconnect from MongoDB: %v", Scrub(disconnectErr))
+		}
+	}()
+
+	err = conn.Ping(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("TestSecret: Failed to ping MongoDB with pending secret for %v: %w", arn, err)
+		return fmt.Errorf("TestSecret: Failed to ping MongoDB with pending secret for %v: %v", Scrub(arn), Scrub(err))
 	} else {
-		log.Printf("TestSecret: Successfully pinged MongoDB with pending secret for %v", arn)
+		log.Printf("TestSecret: Successfully pinged MongoDB with pending secret for %v", Scrub(arn))
 	}
 
 	return nil
@@ -311,13 +385,13 @@ func FinishSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		SecretId: &arn,
 	})
 	if err != nil {
-		log.Printf("finishSecret: Failed to describe secret for %v: %w", arn, err)
+		log.Printf("finishSecret: Failed to describe secret for %v: %v", Scrub(arn), Scrub(err))
 		return
 	}
 	for version, labels := range metadata.VersionIdsToStages {
 		if slices.Contains(labels, "AWSCURRENT") {
 			if strings.EqualFold(version, token) {
-				log.Printf("FinishSecret: Version %v already marked as AWSCURRENT for %v", version, arn)
+				log.Printf("FinishSecret: Version %v already marked as AWSCURRENT for %v", MaskIdentifier(version), Scrub(arn))
 				return
 			}
 			currentVersion = version
@@ -331,7 +405,7 @@ func FinishSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		RemoveFromVersionId: &currentVersion,
 	})
 	if err != nil {
-		log.Printf("finishSecret: Failed to stage secret for %v: %w", arn, err)
+		log.Printf("finishSecret: Failed to stage secret for %v: %v", Scrub(arn), Scrub(err))
 		return
 	}
 	_, err = smClient.UpdateSecretVersionStage(ctx, &secretsmanager.UpdateSecretVersionStageInput{
@@ -340,10 +414,10 @@ func FinishSecret(ctx context.Context, smClient *secretsmanager.Client, arn stri
 		RemoveFromVersionId: &token,
 	})
 	if err != nil {
-		log.Printf("finishSecret: Failed to remove pending stage for %v: %w", arn, err)
+		log.Printf("finishSecret: Failed to remove pending stage for %v: %v", Scrub(arn), Scrub(err))
 		return
 	}
-	log.Printf("FinishSecret: Successfully set AWSCURRENT stage to version %v for secret %v.", token, arn)
+	log.Printf("FinishSecret: Successfully set AWSCURRENT stage to version %v for secret %v.", MaskIdentifier(token), Scrub(arn))
 }
 
 // GetConnection
@@ -375,7 +449,7 @@ func GetConnection(ctx context.Context, secretDict map[string]string) (*mongo.Cl
 	if ok {
 		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
 		if err != nil {
-			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with private_connection_string_srv: %w", err)
+			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with private_connection_string_srv: %v", Scrub(err))
 		} else {
 			return conn, nil
 		}
@@ -386,7 +460,7 @@ func GetConnection(ctx context.Context, secretDict map[string]string) (*mongo.Cl
 	if ok {
 		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
 		if err != nil {
-			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with private_connection_string: %w", err)
+			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with private_connection_string: %v", Scrub(err))
 		} else {
 			return conn, nil
 		}
@@ -397,7 +471,7 @@ func GetConnection(ctx context.Context, secretDict map[string]string) (*mongo.Cl
 	if ok {
 		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
 		if err != nil {
-			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with connection_string_srv: %w", err)
+			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with connection_string_srv: %v", Scrub(err))
 		} else {
 			return conn, nil
 		}
@@ -408,7 +482,7 @@ func GetConnection(ctx context.Context, secretDict map[string]string) (*mongo.Cl
 	if ok {
 		conn, err = mongo.Connect(options.Client().ApplyURI(uri))
 		if err != nil {
-			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with connection_string: %w", err)
+			err = fmt.Errorf("GetConnection: Failed to connect to MongoDB with connection_string: %v", Scrub(err))
 		} else {
 			return conn, nil
 		}
@@ -497,6 +571,9 @@ func GetRandomPassword(ctx context.Context, smClient *secretsmanager.Client) (st
 		passwordLengthStr = "32"
 	}
 	passwordLength, err := strconv.ParseInt(passwordLengthStr, 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("invalid PASSWORD_LENGTH value: %v", Scrub(err))
+	}
 	excludeNumbers := GetEnvironmentBool("EXCLUDE_NUMBERS", false)
 	excludePunctuation := GetEnvironmentBool("EXCLUDE_PUNCTUATION", false)
 	excludeUppercase := GetEnvironmentBool("EXCLUDE_UPPERCASE", false)
@@ -554,24 +631,25 @@ func GetEnvironmentBool(variableName string, defaultValue bool) bool {
 //	    error: The error if any
 func GenerateConnectionString(key string, secretDict map[string]string, password string) (map[string]string, error) {
 	var supportedStrings = []string{"connection_string", "connection_string_srv", "private_connection_string", "private_connection_string_srv"}
-	var host string
-	encodedPassword := url.QueryEscape(password)
-	if slices.Contains(supportedStrings, key) {
-		connSplit := strings.Split(secretDict[key], "/")
-		hostSplit := strings.Split(connSplit[2], "@")
-		if len(hostSplit) < 2 {
-			host = hostSplit[0]
-		} else {
-			host = hostSplit[1]
-		}
-		if len(connSplit) > 3 {
-			secretDict[key] = fmt.Sprintf("%s//%s:%s@%s/%s", connSplit[0], secretDict["username"], encodedPassword, host, connSplit[3])
-		} else {
-			secretDict[key] = fmt.Sprintf("%s//%s:%s@%s", connSplit[0], secretDict["username"], encodedPassword, host)
-		}
-	} else {
+	if !slices.Contains(supportedStrings, key) {
 		return nil, fmt.Errorf("invalid key: %v", key)
 	}
+	// Atlas owns the host list, the replica set options and the SRV scheme, so the
+	// stored URI is parsed and only its user-info section is replaced. Splitting the
+	// string by hand panicked on a URI with no path and mis-detected the host when a
+	// credential contained '@'.
+	parsed, err := url.Parse(secretDict[key])
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse %v as a connection URI: %v", key, Scrub(err))
+	}
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("failed to parse %v as a connection URI: no host found", key)
+	}
+	// url.UserPassword percent-encodes for the user-info section. url.QueryEscape,
+	// used previously, encodes a space as '+', which is not decoded back to a space
+	// there and so corrupted any credential containing one.
+	parsed.User = url.UserPassword(secretDict["username"], password)
+	secretDict[key] = parsed.String()
 	return secretDict, nil
 }
 
@@ -609,18 +687,40 @@ func GenerateConnectionString(key string, secretDict map[string]string, password
 //
 //	      context (LambdaContext): The Lambda runtime information
 func HandleRequest(ctx context.Context, event json.RawMessage) error {
+	if err := rotateSecret(ctx, event); err != nil {
+		log.Printf("HandleRequest: Rotation failed: %v", Scrub(err))
+		return fmt.Errorf("rotation failed, see the function log for details")
+	}
+	return nil
+}
+
+// rotateSecret
+//
+// Runs the rotation step requested by the event.
+//
+//	Errors returned here are reported by HandleRequest after scrubbing, so they
+//	may carry driver detail without reaching the runtime log verbatim.
+//
+//	Args:
+//	    ctx (context.Context): The Lambda invocation context
+//
+//	    event (json.RawMessage): The raw Secrets Manager rotation event
+//
+//	Returns:
+//	    error: Error if the requested rotation step failed
+func rotateSecret(ctx context.Context, event json.RawMessage) error {
 	var smEvent SecretsManagerEvent
 	if err := json.Unmarshal(event, &smEvent); err != nil {
 		return fmt.Errorf("failed to unmarshal event: %w", err)
 	}
 	mongoAdmin, err := InitMongoDBAtlas()
 	if err != nil {
-		log.Fatalf("failed to initialize MongoDB Atlas API client: %v", err)
+		return fmt.Errorf("failed to initialize MongoDB Atlas API client: %v", Scrub(err))
 	}
 	smClient := secretsmanager.NewFromConfig(cfg)
 	arn := smEvent.SecretId
 	token := smEvent.ClientRequestToken
-	log.Printf("Received event: %+v", smEvent)
+	log.Printf("HandleRequest: Received step %v for secret %v, version %v", Scrub(smEvent.Step), Scrub(arn), MaskIdentifier(token))
 	// Describe the secret that was sent to the Lambda function with the event
 	secret, err := smClient.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{
 		SecretId: &smEvent.SecretId,
@@ -639,7 +739,7 @@ func HandleRequest(ctx context.Context, event json.RawMessage) error {
 	}
 
 	if slices.Contains(secretVersion, "AWSCURRENT") {
-		log.Printf("secret version %v is in current state, for secret %v", token, arn)
+		log.Printf("secret version %v is in current state, for secret %v", MaskIdentifier(token), Scrub(arn))
 		return nil
 	} else if !slices.Contains(secretVersion, "AWSPENDING") {
 		return fmt.Errorf("secret version %v not in pending state, for secret %v", token, arn)
