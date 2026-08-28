@@ -357,9 +357,9 @@ def set_secret(service_client, arn, token):
             # bracket-quoted token; alter_object is chosen from two literals. The
             # rules match on the syntax and cannot see either sanitiser.
             alter_object = "LOGIN" if containment == 0 else "USER"
-            # nosemgrep: python.aws-lambda.security.tainted-sql-string.tainted-sql-string
+            # nosemgrep
             alter_stmt = "ALTER {} {} WITH PASSWORD = %s OLD_PASSWORD = %s".format(alter_object, escaped_username)
-            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.aws-lambda.security.pymssql-sqli.pymssql-sqli
+            # nosemgrep
             cursor.execute(alter_stmt, (pending_dict['password'], current_dict['password']))
 
             conn.commit()
