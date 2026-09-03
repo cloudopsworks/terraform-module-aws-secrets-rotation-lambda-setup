@@ -151,7 +151,7 @@ def rotate_secret(event, context):
 
     The Secret SecretString is expected to be a JSON string with the following format:
     {
-        'engine': <required: must be set to 'sqlserver'>,
+        'engine': <required: must be set to 'sqlserver' or 'sqlserver-web'>,
         'host': <required: instance host name>,
         'username': <required: username>,
         'password': <required: password>,
@@ -590,8 +590,9 @@ def get_secret_dict(service_client, arn, stage, token=None):
     secret_dict = json.loads(plaintext)
 
     # Run validations against the secret
-    if 'engine' not in secret_dict or secret_dict['engine'] != 'sqlserver':
-        raise KeyError("Database engine must be set to 'sqlserver' in order to use this rotation lambda")
+    supported_engines = ["sqlserver", "sqlserver-web"]
+    if 'engine' not in secret_dict or secret_dict['engine'] not in supported_engines:
+        raise KeyError("Database engine must be set to 'sqlserver or sqlserver-web' in order to use this rotation lambda")
     for field in required_fields:
         if field not in secret_dict:
             raise KeyError("%s key is missing from secret JSON" % field)
