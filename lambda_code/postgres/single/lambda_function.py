@@ -5,14 +5,145 @@ import boto3
 import json
 import logging
 import os
+import re
 import psycopg
+from psycopg import sql
 import urllib.parse
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+try:
+    logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
+except ValueError:
+    logger.setLevel(logging.INFO)
+
+# Fields of a secret that are safe to name in a log line. Anything outside this
+# allow list -- passwords, tokens and the pre-built connection strings that embed
+# them -- never reaches the log stream.
+LOGGABLE_SECRET_FIELDS = ('engine', 'host', 'port', 'dbname', 'username', 'ssl', 'sslmode', 'schema')
+
+# Placeholder substituted for any credential-looking text.
+REDACTED = '***REDACTED***'
+
+# Maximum length of a single value copied into a log record.
+MAX_LOGGED_LENGTH = 512
+
+# Credential shapes that database drivers and the AWS SDK embed in their error
+# messages: URI user-info sections and key/value pairs.
+_URI_CREDENTIAL_RE = re.compile(r'(?i)(//[^/\s:@]+:)([^@\s/]+)(@)')
+# The negative lookbehind keeps ARN segments such as ":secret:my-secret-name"
+# readable: those identify the secret, they are not the credential.
+_KEY_VALUE_CREDENTIAL_RE = re.compile(
+    r'(?i)(?<!:)(password|passwd|pwd|secret|token|private_key)("?\s*[=:]\s*)("[^"]*"|\'[^\']*\'|[^\s;,&"\']+)'
+)
+
+# Characters that could forge a new log entry (CRLF) or corrupt the log stream.
+_CONTROL_CHARACTERS_RE = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def scrub(value):
+    """Renders a value as a string that is safe to write to the log stream
+
+    Credential-looking substrings are masked, control characters (which could be
+    used to forge log entries) are collapsed to spaces, and the result is
+    truncated so a hostile value cannot flood the log group.
+
+    Args:
+        value: Any value. Non-string values are rendered with str()
+
+    Returns:
+        string: The sanitized representation of the value
+
+    """
+    text = value if isinstance(value, str) else str(value)
+    text = _URI_CREDENTIAL_RE.sub(r'\1' + REDACTED + r'\3', text)
+    text = _KEY_VALUE_CREDENTIAL_RE.sub(r'\1\2' + REDACTED, text)
+    text = _CONTROL_CHARACTERS_RE.sub(' ', text)
+    if len(text) > MAX_LOGGED_LENGTH:
+        text = text[:MAX_LOGGED_LENGTH] + '...(truncated)'
+    return text
+
+
+def mask_identifier(value):
+    """Shortens an opaque identifier so log lines stay correlatable without publishing it
+
+    Args:
+        value: The identifier, typically a secret version id or rotation token
+
+    Returns:
+        string: The leading characters of the identifier followed by an ellipsis
+
+    """
+    text = scrub(value)
+    if len(text) <= 8:
+        return REDACTED
+    return '%s...' % text[:8]
+
+
+def safe_connection_info(secret_dict):
+    """Builds a log-safe description of a connection target
+
+    Only the allow-listed, non-credential fields are copied out of the secret, so
+    neither the password nor a pre-built connection string can reach the log
+    stream through this value.
+
+    Args:
+        secret_dict (dict): The Secret Dictionary
+
+    Returns:
+        dict: The allow-listed connection fields, sanitized for logging
+
+    """
+    return {field: scrub(secret_dict[field]) for field in LOGGABLE_SECRET_FIELDS if field in secret_dict}
+
+
+class RedactingFilter(logging.Filter):
+    """Scrubs every log record as a last line of defence
+
+    Call sites sanitize their own arguments; this filter additionally covers
+    records emitted by the AWS SDK and by the database driver, which may carry
+    connection URIs containing credentials.
+
+    """
+
+    def filter(self, record):
+        record.msg = scrub(record.msg)
+        if isinstance(record.args, dict):
+            record.args = {key: scrub(value) if isinstance(value, str) else value for key, value in record.args.items()}
+        elif record.args:
+            record.args = tuple(scrub(arg) if isinstance(arg, str) else arg for arg in record.args)
+        return True
+
+
+_redacting_filter = RedactingFilter()
+logger.addFilter(_redacting_filter)
+for _handler in logger.handlers:
+    _handler.addFilter(_redacting_filter)
 
 
 def lambda_handler(event, context):
+    """Entry point for the rotation Lambda
+
+    Delegates to rotate_secret and re-raises any failure without its original
+    message, so that a driver or SDK error carrying a connection URI is never
+    printed by the Lambda runtime. The sanitized detail is logged instead.
+
+    Args:
+        event (dict): Lambda dictionary of event parameters
+
+        context (LambdaContext): The Lambda runtime information
+
+    Raises:
+        RuntimeError: If any rotation step fails
+
+    """
+    try:
+        return rotate_secret(event, context)
+    except Exception as error:
+        logger.error("lambda_handler: Rotation failed with %s: %s" % (error.__class__.__name__, scrub(error)))
+        raise RuntimeError("Rotation failed with %s, see the function log for details" % error.__class__.__name__) from None
+
+
+def rotate_secret(event, context):
     """Secrets Manager RDS PostgreSQL Handler
 
     This handler uses the single-user rotation scheme to rotate an RDS PostgreSQL user credential. This rotation
@@ -56,18 +187,18 @@ def lambda_handler(event, context):
     # Make sure the version is staged correctly
     metadata = service_client.describe_secret(SecretId=arn)
     if "RotationEnabled" in metadata and not metadata['RotationEnabled']:
-        logger.error("Secret %s is not enabled for rotation" % arn)
-        raise ValueError("Secret %s is not enabled for rotation" % arn)
+        logger.error("Secret %s is not enabled for rotation" % scrub(arn))
+        raise ValueError("Secret %s is not enabled for rotation" % scrub(arn))
     versions = metadata['VersionIdsToStages']
     if token not in versions:
-        logger.error("Secret version %s has no stage for rotation of secret %s." % (token, arn))
-        raise ValueError("Secret version %s has no stage for rotation of secret %s." % (token, arn))
+        logger.error("Secret version %s has no stage for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
+        raise ValueError("Secret version %s has no stage for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
     if "AWSCURRENT" in versions[token]:
-        logger.info("Secret version %s already set as AWSCURRENT for secret %s." % (token, arn))
+        logger.info("Secret version %s already set as AWSCURRENT for secret %s." % (mask_identifier(token), scrub(arn)))
         return
     elif "AWSPENDING" not in versions[token]:
-        logger.error("Secret version %s not set as AWSPENDING for rotation of secret %s." % (token, arn))
-        raise ValueError("Secret version %s not set as AWSPENDING for rotation of secret %s." % (token, arn))
+        logger.error("Secret version %s not set as AWSPENDING for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
+        raise ValueError("Secret version %s not set as AWSPENDING for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
 
     # Call the appropriate step
     if step == "createSecret":
@@ -83,8 +214,8 @@ def lambda_handler(event, context):
         finish_secret(service_client, arn, token)
 
     else:
-        logger.error("lambda_handler: Invalid step parameter %s for secret %s" % (step, arn))
-        raise ValueError("Invalid step parameter %s for secret %s" % (step, arn))
+        logger.error("lambda_handler: Invalid step parameter %s for secret %s" % (scrub(step), scrub(arn)))
+        raise ValueError("Invalid step parameter %s for secret %s" % (scrub(step), scrub(arn)))
 
 
 def create_secret(service_client, arn, token):
@@ -112,7 +243,7 @@ def create_secret(service_client, arn, token):
     # Now try to get the secret version, if that fails, put a new secret
     try:
         get_secret_dict(service_client, arn, "AWSPENDING", token)
-        logger.info("createSecret: Successfully retrieved secret for %s." % arn)
+        logger.info("createSecret: Successfully retrieved secret for %s." % scrub(arn))
     except service_client.exceptions.ResourceNotFoundException:
         # Get exclude characters from environment variable
         # Generate a random password
@@ -123,7 +254,7 @@ def create_secret(service_client, arn, token):
             current_dict['connection_string'] = generate_connection_string(current_dict, random_pass)
         # Put the secret
         service_client.put_secret_value(SecretId=arn, ClientRequestToken=token, SecretString=json.dumps(current_dict), VersionStages=['AWSPENDING'])
-        logger.info("createSecret: Successfully put secret for ARN %s and version %s." % (arn, token))
+        logger.info("createSecret: Successfully put secret for ARN %s and version %s." % (scrub(arn), mask_identifier(token)))
 
 
 def set_secret(service_client, arn, token):
@@ -153,7 +284,7 @@ def set_secret(service_client, arn, token):
     conn = get_connection(pending_dict)
     if conn:
         conn.close()
-        logger.info("setSecret: AWSPENDING secret is already set as password in PostgreSQL DB for secret arn %s." % arn)
+        logger.info("setSecret: AWSPENDING secret is already set as password in PostgreSQL DB for secret arn %s." % scrub(arn))
         return
 
     # Now try the current password
@@ -167,16 +298,22 @@ def set_secret(service_client, arn, token):
 
     # If we still don't have a connection, raise a ValueError
     if not conn:
-        logger.error("setSecret: Unable to log into database with previous, current, or pending secret of secret arn %s" % arn)
-        raise ValueError("Unable to log into database with previous, current, or pending secret of secret arn %s" % arn)
+        logger.error("setSecret: Unable to log into database with previous, current, or pending secret of secret arn %s" % scrub(arn))
+        raise ValueError("Unable to log into database with previous, current, or pending secret of secret arn %s" % scrub(arn))
 
-    # Now set the password to the pending password
+    # Now set the password to the pending password. The statement is composed with
+    # psycopg's SQL builder so that the role name is quoted as an identifier and the
+    # password as a literal by the driver -- neither is ever concatenated into the
+    # query text, and neither can appear in a query log built from that text.
     try:
         with conn.cursor() as cur:
-            alter_role = "ALTER ROLE %s WITH ENCRYPTED PASSWORD '%s'" % (pending_dict['username'], pending_dict['password'])
+            alter_role = sql.SQL("ALTER ROLE {} WITH ENCRYPTED PASSWORD {}").format(
+                sql.Identifier(pending_dict['username']),
+                sql.Literal(pending_dict['password'])
+            )
             cur.execute(alter_role)
             conn.commit()
-            logger.info("setSecret: Successfully set password for user %s in PostgreSQL DB for secret arn %s." % (pending_dict['username'], arn))
+            logger.info("setSecret: Successfully set password for user %s in PostgreSQL DB for secret arn %s." % (scrub(pending_dict['username']), scrub(arn)))
     finally:
         conn.close()
 
@@ -214,11 +351,11 @@ def test_secret(service_client, arn, token):
         finally:
             conn.close()
 
-        logger.info("testSecret: Successfully signed into PostgreSQL DB with AWSPENDING secret in %s." % arn)
+        logger.info("testSecret: Successfully signed into PostgreSQL DB with AWSPENDING secret in %s." % scrub(arn))
         return
     else:
-        logger.error("testSecret: Unable to log into database with pending secret of secret ARN %s" % arn)
-        raise ValueError("Unable to log into database with pending secret of secret ARN %s" % arn)
+        logger.error("testSecret: Unable to log into database with pending secret of secret ARN %s" % scrub(arn))
+        raise ValueError("Unable to log into database with pending secret of secret ARN %s" % scrub(arn))
 
 
 def finish_secret(service_client, arn, token):
@@ -241,7 +378,7 @@ def finish_secret(service_client, arn, token):
         if "AWSCURRENT" in metadata["VersionIdsToStages"][version]:
             if version == token:
                 # The correct version is already marked as current, return
-                logger.info("finishSecret: Version %s already marked as AWSCURRENT for %s" % (version, arn))
+                logger.info("finishSecret: Version %s already marked as AWSCURRENT for %s" % (mask_identifier(version), scrub(arn)))
                 return
             current_version = version
             break
@@ -249,7 +386,7 @@ def finish_secret(service_client, arn, token):
     # Finalize by staging the secret version current
     service_client.update_secret_version_stage(SecretId=arn, VersionStage="AWSCURRENT", MoveToVersionId=token, RemoveFromVersionId=current_version)
     service_client.update_secret_version_stage(SecretId=arn, VersionStage="AWSPENDING", RemoveFromVersionId=token)
-    logger.info("finishSecret: Successfully set AWSCURRENT stage to version %s for secret %s." % (token, arn))
+    logger.info("finishSecret: Successfully set AWSCURRENT stage to version %s for secret %s." % (mask_identifier(token), scrub(arn)))
 
 
 def get_connection(secret_dict):
@@ -286,28 +423,10 @@ def get_connection(secret_dict):
         )
         return conn
     except psycopg.Error as e:
-        # Print logger.error the psycopg.Error
-        logger.error("Unable to connect to database with secret dictionary %s, Error is: %s %s" % (redact_secret_dict(secret_dict), e.__class__, e))
+        # Report the connection target from the allow list only; the driver message
+        # is scrubbed because libpq errors can echo back the connection parameters.
+        logger.error("Unable to connect to database %s, Error is: %s %s" % (safe_connection_info(secret_dict), e.__class__.__name__, scrub(e)))
         return None
-
-
-def redact_secret_dict(secret_dict):
-    """Redacts the secret dictionary
-
-    This helper function redacts the password in the secret dictionary
-    but without modifying the original dictionary. This is useful for logging.
-
-    Args:
-        secret_dict (dict): The Secret Dictionary
-
-    Returns:
-        dict: The redacted secret dictionary
-
-    """
-    # Redact the password
-    secret_dict_cp = secret_dict.copy()  # Create a copy to avoid modifying the original
-    secret_dict_cp['password'] = "REDACTED"
-    return secret_dict_cp
 
 def get_secret_dict(service_client, arn, stage, token=None):
     """Gets the secret dictionary corresponding for the secret arn, stage, and token
@@ -400,41 +519,192 @@ def get_random_password(service_client):
     return passwd['RandomPassword']
 
 
+# Accepted values of the secret's 'connection_string_type' field, mapped to the
+# dialect that gets rendered. The driver specific names are kept as aliases so
+# that secrets already carrying them keep rotating.
+CONNECTION_STRING_TYPES = {
+    'jdbc': 'jdbc',
+    'dotnet': 'dotnet',
+    'odbc': 'odbc',
+    'uri': 'uri',
+    'go': 'uri',
+    'gopq': 'uri',
+    'node': 'uri',
+    'node-pg': 'uri',
+    'python': 'uri',
+    'psycopg': 'uri',
+    'rust': 'uri',
+    'rustpg': 'uri',
+}
+
+def quote_odbc_value(value):
+    """Quotes a value for an ODBC style ``Key=Value;`` connection string
+
+    ODBC requires a value that contains a delimiter or a leading/trailing space to
+    be enclosed in braces, with any closing brace inside it doubled. Without this a
+    password containing ``;`` would silently truncate the connection string.
+
+    Args:
+        value: The value to quote
+
+    Returns:
+        string: The value, braced when it needs to be
+
+    """
+    text = str(value)
+    if text != text.strip() or any(character in text for character in '[]{}(),;?*=!@'):
+        return '{%s}' % text.replace('}', '}}')
+    return text
+
+
+def quote_dotnet_value(value):
+    """Quotes a value for an ADO.NET style ``Key=Value;`` connection string
+
+    ADO.NET requires a value that contains a delimiter, a quote or a
+    leading/trailing space to be enclosed in double quotes, with any inner double
+    quote doubled.
+
+    Args:
+        value: The value to quote
+
+    Returns:
+        string: The value, quoted when it needs to be
+
+    """
+    text = str(value)
+    if text != text.strip() or any(character in text for character in ';\'"='):
+        return '"%s"' % text.replace('"', '""')
+    return text
+
+
+def build_property_string(parameters, quote_value):
+    """Renders ``Key=Value;`` pairs, skipping the ones that have no value
+
+    Skipping empties keeps optional settings out of the result instead of emitting
+    the string "None" for them.
+
+    Args:
+        parameters (list): (key, value) pairs in the order they should appear
+
+        quote_value (callable): The quoting function for the target dialect
+
+    Returns:
+        string: The rendered connection string
+
+    """
+    return ''.join('%s=%s;' % (key, quote_value(value)) for key, value in parameters if value is not None and str(value) != '')
+
+
+def build_query_string(parameters):
+    """Renders URL query parameters, skipping the ones that have no value
+
+    Args:
+        parameters (list): (key, value) pairs in the order they should appear
+
+    Returns:
+        string: The rendered query string, without the leading '?'
+
+    """
+    return '&'.join('%s=%s' % (key, urllib.parse.quote_plus(str(value))) for key, value in parameters if value is not None and str(value) != '')
+
+
+def build_userinfo(username, password):
+    """Percent-encodes the ``user:password`` section of a connection URI
+
+    Both halves are encoded with no safe characters, so a credential containing
+    ``@``, ``:`` or ``/`` cannot break out of the user-info section. quote() is used
+    rather than quote_plus() because '+' is not decoded back to a space there.
+
+    Args:
+        username (string): The user name
+
+        password (string): The password
+
+    Returns:
+        string: The encoded 'user:password' pair
+
+    """
+    return '%s:%s' % (urllib.parse.quote(str(username), safe=''), urllib.parse.quote(str(password), safe=''))
+
+
 def generate_connection_string(secret_dict, new_password):
     """Generates a connection string for the PostgreSQL database
 
-    This helper function generates a connection string using the provided secret dictionary and new password.
+    This helper function generates a connection string using the provided secret
+    dictionary and the new password, in the dialect named by the secret's
+    'connection_string_type' field.
 
     Args:
         secret_dict (dict): The Secret Dictionary containing connection details
         new_password (str): The new password to be included in the connection string
 
-    Uses secret_dict['connection_string_type'] to determine the format of the connection string. supported formats are:
-        - node-pg | psycopg | rustpg: Uses psycopg2 format
-        - jdbc: Uses JDBC format
-        - odbc: Uses ODBC format
-        - dotnet: Uses .NET format
-        - gopq: Uses GO pq format
+    Supported values of secret_dict['connection_string_type'] are:
+        - jdbc: pgJDBC URL, 'jdbc:postgresql://host:port/db?user=...'
+        - dotnet: Npgsql keyword string, 'Host=...;Port=...;'
+        - odbc: psqlODBC keyword string, 'Driver={PostgreSQL Unicode};...'
+        - uri | go | gopq | node | node-pg | python | psycopg | rust | rustpg:
+          libpq URI, 'postgresql://user:password@host:port/db'. Every libpq based
+          driver accepts this same form, so they share one dialect.
 
     Returns:
         str: The generated connection string
-    """
-    # Precondition: Ensure the secret_dict contains the necessary keys
-    connection_string_type = secret_dict.get('connection_string_type')
-    logger.info("Generating connection string for secret: %s" % connection_string_type)
-    encoded_password = urllib.parse.quote_plus(new_password)
-    if connection_string_type == 'jdbc':
-        conn_string = f"jdbc:postgresql://{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?user={secret_dict['username']}&password={encoded_password}&ssl=true&sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
-    elif connection_string_type == 'dotnet':
-        conn_string = f"Host={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};Username={secret_dict['username']};Password={new_password};SSL Mode={secret_dict.get('sslmode')};Search Path={secret_dict.get('schema', 'public')};"
-    elif connection_string_type == 'odbc':
-        conn_string = f"Driver={{PostgreSQL ODBC Driver(UNICODE)}};Server={secret_dict['host']};Port={secret_dict.get('port', 5432)};Database={secret_dict.get('dbname')};UID={secret_dict['username']};PWD={new_password};sslmode={secret_dict.get('sslmode')};schema={secret_dict.get('schema', 'public')}"
-    elif connection_string_type == 'gopq':
-        conn_string = f"postgres://{secret_dict['username']}:{encoded_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
-    elif connection_string_type == 'node-pg' or connection_string_type == 'psycopg' or connection_string_type == 'rustpg':
-        conn_string = f"postgressql://{secret_dict['username']}:{encoded_password}@{secret_dict['host']}:{secret_dict.get('port', 5432)}/{secret_dict.get('dbname')}?sslmode={secret_dict.get('sslmode')}&schema={secret_dict.get('schema', 'public')}"
-    else:
-        conn_string = "(connection string type not supported)"
-        logger.warning("Connection string type not supported! Supported types are: node-pg, psycopg, rustpg, jdbc, odbc, dotnet, gopq.")
 
-    return conn_string
+    Raises:
+        ValueError: If connection_string_type is missing or is not supported
+
+    """
+    connection_string_type = secret_dict.get('connection_string_type')
+    dialect = CONNECTION_STRING_TYPES.get(connection_string_type)
+    if dialect is None:
+        logger.error("Unsupported connection string type %s, supported types are: %s" % (scrub(connection_string_type), ', '.join(sorted(CONNECTION_STRING_TYPES))))
+        raise ValueError("Unsupported connection_string_type, refusing to overwrite the stored connection string")
+    logger.info("Generating %s connection string for a %s secret" % (dialect, scrub(connection_string_type)))
+
+    host = secret_dict['host']
+    port = secret_dict.get('port', 5432)
+    dbname = secret_dict.get('dbname', 'postgres')
+    username = secret_dict['username']
+    sslmode = secret_dict.get('sslmode')
+    schema = secret_dict.get('schema', 'public')
+
+    if dialect == 'jdbc':
+        # pgJDBC percent-decodes its URL parameters, and names the search path
+        # 'currentSchema'.
+        query = build_query_string([
+            ('user', username),
+            ('password', new_password),
+            ('sslmode', sslmode),
+            ('currentSchema', schema),
+        ])
+        return "jdbc:postgresql://%s:%s/%s?%s" % (host, port, dbname, query)
+
+    if dialect == 'dotnet':
+        return build_property_string([
+            ('Host', host),
+            ('Port', port),
+            ('Database', dbname),
+            ('Username', username),
+            ('Password', new_password),
+            ('SSL Mode', sslmode),
+            ('Search Path', schema),
+        ], quote_dotnet_value)
+
+    if dialect == 'odbc':
+        # psqlODBC has no search path keyword, so the schema is left out here.
+        return "Driver={PostgreSQL Unicode};" + build_property_string([
+            ('Server', host),
+            ('Port', port),
+            ('Database', dbname),
+            ('Uid', username),
+            ('Pwd', new_password),
+            ('sslmode', sslmode),
+        ], quote_odbc_value)
+
+    # libpq URI. The search path travels in 'options', which is the only form
+    # libpq and the drivers built on it accept; a bare 'schema' parameter is
+    # rejected as an unknown keyword.
+    query = build_query_string([
+        ('sslmode', sslmode),
+        ('options', '-csearch_path=%s' % schema if schema else None),
+    ])
+    return "postgresql://%s@%s:%s/%s%s" % (build_userinfo(username, new_password), host, port, dbname, '?%s' % query if query else '')

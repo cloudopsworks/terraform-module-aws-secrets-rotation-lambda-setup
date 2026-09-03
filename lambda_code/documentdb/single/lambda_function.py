@@ -9,10 +9,139 @@ import os
 from pymongo import MongoClient, errors
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+try:
+    logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
+except ValueError:
+    logger.setLevel(logging.INFO)
+
+# Fields of a secret that are safe to name in a log line. Anything outside this
+# allow list -- passwords, tokens and the pre-built connection strings that embed
+# them -- never reaches the log stream.
+LOGGABLE_SECRET_FIELDS = ('engine', 'host', 'port', 'dbname', 'username', 'ssl', 'sslmode', 'schema')
+
+# Placeholder substituted for any credential-looking text.
+REDACTED = '***REDACTED***'
+
+# Maximum length of a single value copied into a log record.
+MAX_LOGGED_LENGTH = 512
+
+# Credential shapes that database drivers and the AWS SDK embed in their error
+# messages: URI user-info sections and key/value pairs.
+_URI_CREDENTIAL_RE = re.compile(r'(?i)(//[^/\s:@]+:)([^@\s/]+)(@)')
+# The negative lookbehind keeps ARN segments such as ":secret:my-secret-name"
+# readable: those identify the secret, they are not the credential.
+_KEY_VALUE_CREDENTIAL_RE = re.compile(
+    r'(?i)(?<!:)(password|passwd|pwd|secret|token|private_key)("?\s*[=:]\s*)("[^"]*"|\'[^\']*\'|[^\s;,&"\']+)'
+)
+
+# Characters that could forge a new log entry (CRLF) or corrupt the log stream.
+_CONTROL_CHARACTERS_RE = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def scrub(value):
+    """Renders a value as a string that is safe to write to the log stream
+
+    Credential-looking substrings are masked, control characters (which could be
+    used to forge log entries) are collapsed to spaces, and the result is
+    truncated so a hostile value cannot flood the log group.
+
+    Args:
+        value: Any value. Non-string values are rendered with str()
+
+    Returns:
+        string: The sanitized representation of the value
+
+    """
+    text = value if isinstance(value, str) else str(value)
+    text = _URI_CREDENTIAL_RE.sub(r'\1' + REDACTED + r'\3', text)
+    text = _KEY_VALUE_CREDENTIAL_RE.sub(r'\1\2' + REDACTED, text)
+    text = _CONTROL_CHARACTERS_RE.sub(' ', text)
+    if len(text) > MAX_LOGGED_LENGTH:
+        text = text[:MAX_LOGGED_LENGTH] + '...(truncated)'
+    return text
+
+
+def mask_identifier(value):
+    """Shortens an opaque identifier so log lines stay correlatable without publishing it
+
+    Args:
+        value: The identifier, typically a secret version id or rotation token
+
+    Returns:
+        string: The leading characters of the identifier followed by an ellipsis
+
+    """
+    text = scrub(value)
+    if len(text) <= 8:
+        return REDACTED
+    return '%s...' % text[:8]
+
+
+def safe_connection_info(secret_dict):
+    """Builds a log-safe description of a connection target
+
+    Only the allow-listed, non-credential fields are copied out of the secret, so
+    neither the password nor a pre-built connection string can reach the log
+    stream through this value.
+
+    Args:
+        secret_dict (dict): The Secret Dictionary
+
+    Returns:
+        dict: The allow-listed connection fields, sanitized for logging
+
+    """
+    return {field: scrub(secret_dict[field]) for field in LOGGABLE_SECRET_FIELDS if field in secret_dict}
+
+
+class RedactingFilter(logging.Filter):
+    """Scrubs every log record as a last line of defence
+
+    Call sites sanitize their own arguments; this filter additionally covers
+    records emitted by the AWS SDK and by the database driver, which may carry
+    connection URIs containing credentials.
+
+    """
+
+    def filter(self, record):
+        record.msg = scrub(record.msg)
+        if isinstance(record.args, dict):
+            record.args = {key: scrub(value) if isinstance(value, str) else value for key, value in record.args.items()}
+        elif record.args:
+            record.args = tuple(scrub(arg) if isinstance(arg, str) else arg for arg in record.args)
+        return True
+
+
+_redacting_filter = RedactingFilter()
+logger.addFilter(_redacting_filter)
+for _handler in logger.handlers:
+    _handler.addFilter(_redacting_filter)
 
 
 def lambda_handler(event, context):
+    """Entry point for the rotation Lambda
+
+    Delegates to rotate_secret and re-raises any failure without its original
+    message, so that a driver or SDK error carrying a connection URI is never
+    printed by the Lambda runtime. The sanitized detail is logged instead.
+
+    Args:
+        event (dict): Lambda dictionary of event parameters
+
+        context (LambdaContext): The Lambda runtime information
+
+    Raises:
+        RuntimeError: If any rotation step fails
+
+    """
+    try:
+        return rotate_secret(event, context)
+    except Exception as error:
+        logger.error("lambda_handler: Rotation failed with %s: %s" % (error.__class__.__name__, scrub(error)))
+        raise RuntimeError("Rotation failed with %s, see the function log for details" % error.__class__.__name__) from None
+
+
+def rotate_secret(event, context):
     """Secrets Manager MongoDB Handler
 
     This handler uses the single-user rotation scheme to rotate a MongoDB user credential. This rotation scheme
@@ -56,18 +185,18 @@ def lambda_handler(event, context):
     # Make sure the version is staged correctly
     metadata = service_client.describe_secret(SecretId=arn)
     if "RotationEnabled" in metadata and not metadata['RotationEnabled']:
-        logger.error("Secret %s is not enabled for rotation" % arn)
-        raise ValueError("Secret %s is not enabled for rotation" % arn)
+        logger.error("Secret %s is not enabled for rotation" % scrub(arn))
+        raise ValueError("Secret %s is not enabled for rotation" % scrub(arn))
     versions = metadata['VersionIdsToStages']
     if token not in versions:
-        logger.error("Secret version %s has no stage for rotation of secret %s." % (token, arn))
-        raise ValueError("Secret version %s has no stage for rotation of secret %s." % (token, arn))
+        logger.error("Secret version %s has no stage for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
+        raise ValueError("Secret version %s has no stage for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
     if "AWSCURRENT" in versions[token]:
-        logger.info("Secret version %s already set as AWSCURRENT for secret %s." % (token, arn))
+        logger.info("Secret version %s already set as AWSCURRENT for secret %s." % (mask_identifier(token), scrub(arn)))
         return
     elif "AWSPENDING" not in versions[token]:
-        logger.error("Secret version %s not set as AWSPENDING for rotation of secret %s." % (token, arn))
-        raise ValueError("Secret version %s not set as AWSPENDING for rotation of secret %s." % (token, arn))
+        logger.error("Secret version %s not set as AWSPENDING for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
+        raise ValueError("Secret version %s not set as AWSPENDING for rotation of secret %s." % (mask_identifier(token), scrub(arn)))
 
     # Call the appropriate step
     if step == "createSecret":
@@ -83,8 +212,8 @@ def lambda_handler(event, context):
         finish_secret(service_client, arn, token)
 
     else:
-        logger.error("lambda_handler: Invalid step parameter %s for secret %s" % (step, arn))
-        raise ValueError("Invalid step parameter %s for secret %s" % (step, arn))
+        logger.error("lambda_handler: Invalid step parameter %s for secret %s" % (scrub(step), scrub(arn)))
+        raise ValueError("Invalid step parameter %s for secret %s" % (scrub(step), scrub(arn)))
 
 
 def create_secret(service_client, arn, token):
@@ -112,14 +241,14 @@ def create_secret(service_client, arn, token):
     # Now try to get the secret version, if that fails, put a new secret
     try:
         get_secret_dict(service_client, arn, "AWSPENDING", token)
-        logger.info("createSecret: Successfully retrieved secret for %s." % arn)
+        logger.info("createSecret: Successfully retrieved secret for %s." % scrub(arn))
     except service_client.exceptions.ResourceNotFoundException:
         # Generate a random password
         current_dict['password'] = get_random_password(service_client)
 
         # Put the secret
         service_client.put_secret_value(SecretId=arn, ClientRequestToken=token, SecretString=json.dumps(current_dict), VersionStages=['AWSPENDING'])
-        logger.info("createSecret: Successfully put secret for ARN %s and version %s." % (arn, token))
+        logger.info("createSecret: Successfully put secret for ARN %s and version %s." % (scrub(arn), mask_identifier(token)))
 
 
 def set_secret(service_client, arn, token):
@@ -155,18 +284,18 @@ def set_secret(service_client, arn, token):
     conn = get_connection(pending_dict)
     if conn:
         conn.logout()
-        logger.info("setSecret: AWSPENDING secret is already set as password in MongoDB for secret arn %s." % arn)
+        logger.info("setSecret: AWSPENDING secret is already set as password in MongoDB for secret arn %s." % scrub(arn))
         return
 
     # Make sure the user from current and pending match
     if current_dict['username'] != pending_dict['username']:
-        logger.error("setSecret: Attempting to modify user %s other than current user %s" % (pending_dict['username'], current_dict['username']))
-        raise ValueError("Attempting to modify user %s other than current user %s" % (pending_dict['username'], current_dict['username']))
+        logger.error("setSecret: Attempting to modify user %s other than current user %s" % (scrub(pending_dict['username']), scrub(current_dict['username'])))
+        raise ValueError("Attempting to modify user %s other than current user %s" % (scrub(pending_dict['username']), scrub(current_dict['username'])))
 
     # Make sure the host from current and pending match
     if current_dict['host'] != pending_dict['host']:
-        logger.error("setSecret: Attempting to modify user for host %s other than current host %s" % (pending_dict['host'], current_dict['host']))
-        raise ValueError("Attempting to modify user for host %s other than current host %s" % (pending_dict['host'], current_dict['host']))
+        logger.error("setSecret: Attempting to modify user for host %s other than current host %s" % (scrub(pending_dict['host']), scrub(current_dict['host'])))
+        raise ValueError("Attempting to modify user for host %s other than current host %s" % (scrub(pending_dict['host']), scrub(current_dict['host'])))
 
     # Now try the current password
     conn = get_connection(current_dict)
@@ -182,24 +311,24 @@ def set_secret(service_client, arn, token):
 
         # Make sure the user/host from previous and pending match
         if previous_dict['username'] != pending_dict['username']:
-            logger.error("setSecret: Attempting to modify user %s other than previous valid user %s" % (pending_dict['username'], previous_dict['username']))
-            raise ValueError("Attempting to modify user %s other than previous valid user %s" % (pending_dict['username'], previous_dict['username']))
+            logger.error("setSecret: Attempting to modify user %s other than previous valid user %s" % (scrub(pending_dict['username']), scrub(previous_dict['username'])))
+            raise ValueError("Attempting to modify user %s other than previous valid user %s" % (scrub(pending_dict['username']), scrub(previous_dict['username'])))
         if previous_dict['host'] != pending_dict['host']:
-            logger.error("setSecret: Attempting to modify user for host %s other than previous host %s" % (pending_dict['host'], previous_dict['host']))
-            raise ValueError("Attempting to modify user for host %s other than previous host %s" % (pending_dict['host'], previous_dict['host']))
+            logger.error("setSecret: Attempting to modify user for host %s other than previous host %s" % (scrub(pending_dict['host']), scrub(previous_dict['host'])))
+            raise ValueError("Attempting to modify user for host %s other than previous host %s" % (scrub(pending_dict['host']), scrub(previous_dict['host'])))
 
     # If we still don't have a connection, raise a ValueError
     if not conn:
-        logger.error("setSecret: Unable to log into database with previous, current, or pending secret of secret arn %s" % arn)
-        raise ValueError("Unable to log into database with previous, current, or pending secret of secret arn %s" % arn)
+        logger.error("setSecret: Unable to log into database with previous, current, or pending secret of secret arn %s" % scrub(arn))
+        raise ValueError("Unable to log into database with previous, current, or pending secret of secret arn %s" % scrub(arn))
 
     # Now set the password to the pending password
     try:
         conn.command("updateUser", pending_dict['username'], pwd=pending_dict['password'])
-        logger.info("setSecret: Successfully set password for user %s in MongoDB for secret arn %s." % (pending_dict['username'], arn))
-    except errors.PyMongoError:
-        logger.error("setSecret: Error encountered when attempting to set password in database for user %s", pending_dict['username'])
-        raise ValueError("Error encountered when attempting to set password in database for user %s", pending_dict['username'])
+        logger.info("setSecret: Successfully set password for user %s in MongoDB for secret arn %s." % (scrub(pending_dict['username']), scrub(arn)))
+    except errors.PyMongoError as e:
+        logger.error("setSecret: Error encountered when attempting to set password in database for user %s: %s" % (scrub(pending_dict['username']), e.__class__.__name__))
+        raise ValueError("Error encountered when attempting to set password in database for user %s" % scrub(pending_dict['username'])) from None
     finally:
         conn.logout()
 
@@ -236,11 +365,11 @@ def test_secret(service_client, arn, token):
         finally:
             conn.logout()
 
-        logger.info("testSecret: Successfully signed into MongoDB with AWSPENDING secret in %s." % arn)
+        logger.info("testSecret: Successfully signed into MongoDB with AWSPENDING secret in %s." % scrub(arn))
         return
     else:
-        logger.error("testSecret: Unable to log into database with pending secret of secret ARN %s" % arn)
-        raise ValueError("Unable to log into database with pending secret of secret ARN %s" % arn)
+        logger.error("testSecret: Unable to log into database with pending secret of secret ARN %s" % scrub(arn))
+        raise ValueError("Unable to log into database with pending secret of secret ARN %s" % scrub(arn))
 
 
 def finish_secret(service_client, arn, token):
@@ -263,14 +392,14 @@ def finish_secret(service_client, arn, token):
         if "AWSCURRENT" in metadata["VersionIdsToStages"][version]:
             if version == token:
                 # The correct version is already marked as current, return
-                logger.info("finishSecret: Version %s already marked as AWSCURRENT for %s" % (version, arn))
+                logger.info("finishSecret: Version %s already marked as AWSCURRENT for %s" % (mask_identifier(version), scrub(arn)))
                 return
             current_version = version
             break
 
     # Finalize by staging the secret version current
     service_client.update_secret_version_stage(SecretId=arn, VersionStage="AWSCURRENT", MoveToVersionId=token, RemoveFromVersionId=current_version)
-    logger.info("finishSecret: Successfully set AWSCURRENT stage to version %s for secret %s." % (token, arn))
+    logger.info("finishSecret: Successfully set AWSCURRENT stage to version %s for secret %s." % (mask_identifier(token), scrub(arn)))
 
 
 def get_connection(secret_dict):
@@ -372,13 +501,19 @@ def connect_and_authenticate(secret_dict, port, dbname, use_ssl):
         client = MongoClient(host=secret_dict['host'], port=port, connectTimeoutMS=5000, serverSelectionTimeoutMS=5000, ssl=use_ssl)
         db = client[dbname]
         db.authenticate(secret_dict['username'], secret_dict['password'])
-        logger.info("Successfully established %s connection as user '%s' with host: '%s'" % ("SSL/TLS" if use_ssl else "non SSL/TLS", secret_dict['username'], secret_dict['host']))
+        logger.info("Successfully established %s connection as user '%s' with host: '%s'" % ("SSL/TLS" if use_ssl else "non SSL/TLS", scrub(secret_dict['username']), scrub(secret_dict['host'])))
         return db
     except errors.PyMongoError as e:
-        if 'SSL handshake failed' in e.args[0]:
-            logger.error("Unable to establish SSL/TLS handshake, check that SSL/TLS is enabled on the host: %s" % secret_dict['host'])
-        elif re.search("hostname '.+' doesn't match", e.args[0]):
-            logger.error("Hostname verification failed when estlablishing SSL/TLS Handshake with host: %s" % secret_dict['host'])
+        # pymongo error text can carry the full connection URI, so it is scrubbed
+        # before it is inspected or logged. Indexing into e.args is avoided because
+        # not every PyMongoError carries a message argument.
+        message = scrub(e)
+        if 'SSL handshake failed' in message:
+            logger.error("Unable to establish SSL/TLS handshake, check that SSL/TLS is enabled on the host: %s" % scrub(secret_dict['host']))
+        elif re.search("hostname '.+' doesn't match", message):
+            logger.error("Hostname verification failed when establishing SSL/TLS Handshake with host: %s" % scrub(secret_dict['host']))
+        else:
+            logger.warning("Unable to connect to database %s, Error is: %s %s" % (safe_connection_info(secret_dict), e.__class__.__name__, message))
         return None
 
 
