@@ -119,6 +119,6 @@ jobs:
         continue-on-error: true
         with:
           source_path: ${{ steps.co.outputs.source_path }}
-          semgrep_token: ${{ secrets.semgrep_token }}
+          semgrep_token: ${{ secrets.SEMGREP_TOKEN }}
           bot_user: ${{ vars.BOT_USER }}
           token: ${{ secrets.BOT_TOKEN }}
