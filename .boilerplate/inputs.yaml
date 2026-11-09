@@ -13,7 +13,8 @@ settings:
   # JSON {"api_key":"<upstream management credential>"}; this module never creates or updates it.
   # Never put the management key value in Terraform inputs.
   # Seed the external target secret separately. OpenAI needs api_key, api_key_id, provider: openai,
-  # project_id, and service_account_id; OpenRouter needs api_key, api_key_id (the key hash), and provider: openrouter.
+  # project_id, and service_account_id; OpenRouter needs api_key, api_key_id (the key hash),
+  # provider: openrouter, and workspace_id when the existing key belongs to a workspace.
   # Each new version keeps the provider key ID and a bounded predecessor trace; no key value enters Terraform state.
   # api_key_name: rotated-api-key # (Optional) Replacement key name. Default: rotated-api-key.
   # management_api_key: # (Required for openai/openrouter) Pre-existing management key secret.
@@ -28,7 +29,7 @@ settings:
   #   limit_reset: daily # (Optional) Reset interval: daily, weekly, monthly, or null. Default: none.
   #   include_byok_in_limit: false # (Optional) Include BYOK usage in cap. Default: provider default.
   #   expires_at: "2027-01-01T00:00:00Z" # (Optional) UTC ISO-8601 expiration with seconds. Default: provider default.
-  #   workspace_id: 00000000-0000-0000-0000-000000000000 # (Optional) Workspace UUID. Default: provider default.
+  #   workspace_id: 00000000-0000-0000-0000-000000000000 # (Optional) Workspace UUID fallback when the target secret lacks workspace_id; the secret wins when both are set.
   #   creator_user_id: user_123 # (Optional) Creator user ID. Default: provider default.
   # OpenRouter external keys are not supported: never put an external API key in Terraform inputs.
   log_retention_days: 14 # (Optional) CloudWatch Logs retention in days. Default: 14.

@@ -91,6 +91,9 @@ def check_secret(secret, provider, check_environment=False):
         if check_environment and (project != os.environ["OPENAI_PROJECT_ID"] or
                                   account != os.environ["OPENAI_SERVICE_ACCOUNT_ID"]):
             raise ValueError("OpenAI key secret binding differs from configuration")
+    elif "workspace_id" in secret and (not isinstance(secret["workspace_id"], str) or
+                                         not secret["workspace_id"]):
+        raise ValueError("OpenRouter key secret has an invalid workspace ID")
 
 
 def audit(action, provider, arn, version_id, key_id, secret):
@@ -140,11 +143,29 @@ def create_secret(secrets, arn, token, provider):
     except secrets.exceptions.ResourceNotFoundException:
         pass
     admin_key = management_key(secrets)
-    key, key_id = PROVIDERS[provider].create_key(admin_key, token)
+    if provider == "openrouter":
+        key, key_id, requested_workspace, returned_workspace = openrouter_keys.create_key(
+            admin_key, token, current.get("workspace_id"))
+    else:
+        key, key_id = openai_keys.create_key(admin_key, token)
     pending = {
         **current, "api_key": key, "api_key_id": key_id, "provider": provider,
         "rotation": {"previous_version_id": current_version, "previous_api_key_id": current["api_key_id"]},
     }
+    workspace_error = None
+    if provider == "openrouter":
+        if returned_workspace is not None and (not isinstance(returned_workspace, str) or not returned_workspace):
+            workspace_error = "workspace_invalid"
+        elif requested_workspace is not None and returned_workspace != requested_workspace:
+            workspace_error = "workspace_mismatch"
+    if workspace_error:
+        audit("issued", provider, arn, token, key_id, pending)
+        audit(workspace_error, provider, arn, token, key_id, pending)
+        revoke_key(provider, admin_key, pending)
+        audit("revoked_unreferenced", provider, arn, token, key_id, pending)
+        raise ValueError("OpenRouter did not confirm the requested key workspace")
+    if provider == "openrouter" and returned_workspace is not None:
+        pending["workspace_id"] = returned_workspace
     audit("issued", provider, arn, token, key_id, pending)
     try:
         secrets.put_secret_value(
@@ -197,6 +218,9 @@ def finish_secret(secrets, arn, token, provider, metadata):
     if provider == "openai" and (previous["project_id"] != pending["project_id"] or
                                  previous["service_account_id"] != pending["service_account_id"]):
         raise ValueError("OpenAI previous key binding differs from pending")
+    if provider == "openrouter" and previous.get("workspace_id") is not None and \
+            previous["workspace_id"] != pending.get("workspace_id"):
+        raise ValueError("OpenRouter previous key workspace differs from pending")
     versions = metadata["VersionIdsToStages"]
     if "AWSCURRENT" not in versions.get(token, []):
         current, current_version = get_secret_version(secrets, arn, VersionStage="AWSCURRENT")
@@ -207,6 +231,9 @@ def finish_secret(secrets, arn, token, provider, metadata):
         if provider == "openai" and (current["project_id"] != pending["project_id"] or
                                      current["service_account_id"] != pending["service_account_id"]):
             raise ValueError("OpenAI current key binding differs from pending")
+        if provider == "openrouter" and current.get("workspace_id") is not None and \
+                current["workspace_id"] != pending.get("workspace_id"):
+            raise ValueError("OpenRouter current key workspace differs from pending")
         secrets.update_secret_version_stage(
             SecretId=arn,
             VersionStage="AWSCURRENT",
@@ -221,5 +248,7 @@ def finish_secret(secrets, arn, token, provider, metadata):
     if provider == "openai" and (current["project_id"] != pending["project_id"] or
                                  current["service_account_id"] != pending["service_account_id"]):
         raise ValueError("OpenAI current key binding differs from pending")
+    if provider == "openrouter" and current.get("workspace_id") != pending.get("workspace_id"):
+        raise ValueError("OpenRouter current key workspace differs from pending")
     revoke_key(provider, management_key(secrets), previous)
     audit("retired", provider, arn, old_token, previous["api_key_id"], previous)

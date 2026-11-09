@@ -27,7 +27,9 @@
 #   allowed_secrets:              # (Optional) Secrets Manager secret ARNs the rotation function may read and update.
 #     - arn:aws:secretsmanager:<region>:<account>:secret:<name>
 #   # The external target secret must contain api_key, api_key_id, and provider. OpenAI targets also require
-#   # project_id and service_account_id matching settings.openai. Lambda records each new key ID and predecessor.
+#   # project_id and service_account_id matching settings.openai. OpenRouter targets should include workspace_id
+#   # when the existing key belongs to a workspace; that value takes precedence over settings.openrouter.workspace_id.
+#   # Lambda records each new key ID and predecessor.
 #   api_key_name: "rotated-api-key"  # (Optional) Upstream replacement-key name for openai/openrouter. Default: rotated-api-key.
 #   management_api_key:             # (Required for openai/openrouter) Pre-existing management credential secret; this module never creates or updates it. SecretString must contain JSON {"api_key":"<upstream management key>"}.
 #     secret_arn: "arn:aws:secretsmanager:<region>:<account>:secret:<name>" # (Required) Plan-time-known name or ARN of the existing AWS Secrets Manager secret. Its ARN and KMS key are resolved automatically.
@@ -41,7 +43,7 @@
 #     limit_reset: daily           # (Optional) Limit reset interval: daily, weekly, monthly, or null. Default: none.
 #     include_byok_in_limit: false # (Optional) Count BYOK usage toward the spending limit. Default: provider default.
 #     expires_at: "2027-01-01T00:00:00Z" # (Optional) UTC ISO-8601 expiration with seconds. Default: provider default.
-#     workspace_id: "<uuid>"       # (Optional) Workspace UUID for the new key. Default: provider default.
+#     workspace_id: "<uuid>"       # (Optional) Workspace UUID fallback when the target secret lacks workspace_id. Default: provider default.
 #     creator_user_id: "user_..."  # (Optional) User ID attributed as creator. Default: provider default.
 #   # OpenRouter external keys are not supported because they may contain a credential; do not put them in Terraform inputs.
 #   allowed_kms:                  # (Optional) KMS key ARNs used to decrypt the allowed target secrets.

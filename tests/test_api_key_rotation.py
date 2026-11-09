@@ -153,6 +153,91 @@ class RotationTests(unittest.TestCase):
             "previous_version_id": "current", "previous_api_key_id": "old-id",
         })
 
+    def test_openrouter_secret_workspace_overrides_parameter_and_is_preserved(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"workspace_id":"configured-workspace","limit":10}'
+        self.secrets.values["current"] = {
+            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+            "workspace_id": "secret-workspace",
+        }
+        response = {"key": "new-router-key", "data": {
+            "hash": "router-hash", "workspace_id": "secret-workspace",
+        }}
+        with patch.object(openrouter_keys, "call_api", return_value=response) as api:
+            rotation.rotate(self.event, self.secrets)
+        self.assertEqual(api.call_args.args[3]["workspace_id"], "secret-workspace")
+        self.assertEqual(self.secrets.values["token-123456789"]["workspace_id"], "secret-workspace")
+
+    def test_openrouter_parameter_workspace_is_captured_when_secret_omits_it(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"workspace_id":"configured-workspace"}'
+        self.secrets.values["current"] = {
+            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+        }
+        response = {"key": "new-router-key", "data": {
+            "hash": "router-hash", "workspace_id": "configured-workspace",
+        }}
+        with patch.object(openrouter_keys, "call_api", return_value=response):
+            rotation.rotate(self.event, self.secrets)
+        self.assertEqual(self.secrets.values["token-123456789"]["workspace_id"], "configured-workspace")
+
+    def test_openrouter_captured_workspace_survives_parameter_change(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"workspace_id":"first-workspace"}'
+        self.secrets.values["current"] = {
+            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+        }
+        responses = [
+            {"key": "first-key", "data": {"hash": "first-id", "workspace_id": "first-workspace"}},
+            {"key": "second-key", "data": {"hash": "second-id", "workspace_id": "first-workspace"}},
+        ]
+        with patch.object(openrouter_keys, "call_api", side_effect=responses) as api, \
+             patch.object(openrouter_keys, "delete_key"):
+            rotation.rotate(self.event, self.secrets)
+            self.event["Step"] = "finishSecret"
+            rotation.rotate(self.event, self.secrets)
+            os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"workspace_id":"changed-workspace"}'
+            self.secrets.stages["token-234567890"] = ["AWSPENDING"]
+            self.event.update(ClientRequestToken="token-234567890", Step="createSecret")
+            rotation.rotate(self.event, self.secrets)
+        self.assertEqual(api.call_args_list[1].args[3]["workspace_id"], "first-workspace")
+        self.assertEqual(self.secrets.values["token-234567890"]["workspace_id"], "first-workspace")
+
+    def test_openrouter_workspace_mismatch_revokes_unstored_key(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"workspace_id":"configured-workspace"}'
+        self.secrets.values["current"] = {
+            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+            "workspace_id": "secret-workspace",
+        }
+        response = {"key": "new-router-key", "data": {
+            "hash": "router-hash", "workspace_id": "other-workspace",
+        }}
+        with patch.object(openrouter_keys, "call_api", return_value=response), \
+             patch.object(openrouter_keys, "delete_key") as delete:
+            with self.assertRaisesRegex(ValueError, "did not confirm"):
+                rotation.rotate(self.event, self.secrets)
+        delete.assert_called_once_with("management-credential", "router-hash")
+        self.assertNotIn("token-123456789", self.secrets.values)
+
+    def test_openrouter_parameter_workspace_requires_matching_provider_confirmation(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"workspace_id":"configured-workspace"}'
+        self.secrets.values["current"] = {
+            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+        }
+        for returned_workspace in (None, "other-workspace"):
+            response = {"key": "new-router-key", "data": {"hash": "router-hash"}}
+            if returned_workspace is not None:
+                response["data"]["workspace_id"] = returned_workspace
+            with self.subTest(returned_workspace=returned_workspace), \
+                 patch.object(openrouter_keys, "call_api", return_value=response), \
+                 patch.object(openrouter_keys, "delete_key") as delete:
+                with self.assertRaisesRegex(ValueError, "did not confirm"):
+                    rotation.rotate(self.event, self.secrets)
+                delete.assert_called_once_with("management-credential", "router-hash")
+                self.assertNotIn("token-123456789", self.secrets.values)
+
     def test_second_rotation_replaces_predecessor_trace_without_nesting(self):
         with patch.object(openai_keys, "create_key", side_effect=[
             ("first-workload", "first-id"), ("second-workload", "second-id"),
@@ -231,6 +316,20 @@ class RotationTests(unittest.TestCase):
         self.event["Step"] = "finishSecret"
         with patch.object(openai_keys, "delete_key") as delete:
             with self.assertRaisesRegex(ValueError, "matches its predecessor"):
+                rotation.rotate(self.event, self.secrets)
+        delete.assert_not_called()
+        self.assertEqual(self.secrets.stages["current"], ["AWSCURRENT"])
+
+    def test_openrouter_finish_rejects_workspace_change(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        self.secrets.values["current"] = {
+            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+            "workspace_id": "original-workspace",
+        }
+        self.secrets.values["token-123456789"] = self.pending(workspace_id="other-workspace")
+        self.event["Step"] = "finishSecret"
+        with patch.object(openrouter_keys, "delete_key") as delete:
+            with self.assertRaisesRegex(ValueError, "workspace differs"):
                 rotation.rotate(self.event, self.secrets)
         delete.assert_not_called()
         self.assertEqual(self.secrets.stages["current"], ["AWSCURRENT"])
