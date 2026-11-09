@@ -17,8 +17,7 @@ settings:
   # Each new version keeps the provider key ID and a bounded predecessor trace; no key value enters Terraform state.
   # api_key_name: rotated-api-key # (Optional) Replacement key name. Default: rotated-api-key.
   # management_api_key: # (Required for openai/openrouter) Pre-existing management key secret.
-  #   secret_arn: arn:aws:secretsmanager:us-east-1:111122223333:secret:app/management-AbCdEf # (Required) ARN of the supplied secret.
-  #   kms_key_arn: arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012 # (Optional) Customer-managed KMS key ARN when the supplied secret uses one.
+  #   secret_arn: app/management # (Required) Existing, plan-time-known secret name or ARN. The module resolves its ARN and KMS key automatically.
   # openai: # (Required when type is openai) Existing OpenAI project and service account.
   #   project_id: proj_123 # (Required) OpenAI project ID.
   #   service_account_id: svc_acct_123 # (Required) OpenAI service-account ID.

@@ -9,7 +9,8 @@
 
 locals {
   api_key_rotation      = contains(["openai", "openrouter"], var.settings.type)
-  management_secret_arn = try(var.settings.management_api_key.secret_arn, null)
+  management_secret_id  = try(trimspace(var.settings.management_api_key.secret_arn), null)
+  management_secret_arn = local.api_key_rotation ? data.aws_secretsmanager_secret.management_api_key[0].arn : null
   multi_user            = try(var.settings.multi_user, false)
   function_name         = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
   function_name_short   = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
@@ -134,12 +135,6 @@ resource "aws_lambda_function" "this" {
         try(var.settings.openai.expires_in_seconds >= 1 && var.settings.openai.expires_in_seconds <= 31536000, false)
       )
       error_message = "settings.openai.expires_in_seconds must be between 1 and 31536000, or null."
-    }
-    precondition {
-      condition = !local.api_key_rotation || (
-        can(regex("^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+", local.management_secret_arn))
-      )
-      error_message = "API key rotation requires settings.management_api_key.secret_arn containing a Secrets Manager secret ARN."
     }
     precondition {
       condition     = !local.api_key_rotation || length(try(var.settings.allowed_secrets, [])) > 0

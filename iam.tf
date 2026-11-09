@@ -123,6 +123,19 @@ resource "aws_iam_role_policy" "allowed_secrets" {
   policy = data.aws_iam_policy_document.allowed_secrets[0].json
 }
 
+data "aws_secretsmanager_secret" "management_api_key" {
+  count = local.api_key_rotation ? 1 : 0
+
+  arn  = startswith(local.management_secret_id, "arn:") ? local.management_secret_id : null
+  name = startswith(local.management_secret_id, "arn:") ? null : local.management_secret_id
+}
+
+data "aws_kms_key" "management_api_key" {
+  count = local.api_key_rotation && try(trimspace(data.aws_secretsmanager_secret.management_api_key[0].kms_key_id), "") != "" ? 1 : 0
+
+  key_id = data.aws_secretsmanager_secret.management_api_key[0].kms_key_id
+}
+
 data "aws_iam_policy_document" "management_api_key" {
   count = local.api_key_rotation ? 1 : 0
 
@@ -142,13 +155,13 @@ resource "aws_iam_role_policy" "management_api_key" {
 }
 
 data "aws_iam_policy_document" "management_api_key_kms" {
-  count = local.api_key_rotation && try(var.settings.management_api_key.kms_key_arn, null) != null ? 1 : 0
+  count = length(data.aws_kms_key.management_api_key)
 
   statement {
     sid       = "DecryptManagementApiKey"
     effect    = "Allow"
     actions   = ["kms:Decrypt"]
-    resources = [var.settings.management_api_key.kms_key_arn]
+    resources = [data.aws_kms_key.management_api_key[0].arn]
     condition {
       test     = "StringEquals"
       variable = "kms:EncryptionContext:SecretARN"
@@ -158,7 +171,7 @@ data "aws_iam_policy_document" "management_api_key_kms" {
 }
 
 resource "aws_iam_role_policy" "management_api_key_kms" {
-  count  = local.api_key_rotation && try(var.settings.management_api_key.kms_key_arn, null) != null ? 1 : 0
+  count  = length(data.aws_kms_key.management_api_key)
   name   = "${local.function_name_short}-management-key-kms-policy"
   role   = aws_iam_role.default_lambda_function.name
   policy = data.aws_iam_policy_document.management_api_key_kms[0].json

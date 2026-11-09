@@ -30,8 +30,7 @@
 #   # project_id and service_account_id matching settings.openai. Lambda records each new key ID and predecessor.
 #   api_key_name: "rotated-api-key"  # (Optional) Upstream replacement-key name for openai/openrouter. Default: rotated-api-key.
 #   management_api_key:             # (Required for openai/openrouter) Pre-existing management credential secret; this module never creates or updates it. SecretString must contain JSON {"api_key":"<upstream management key>"}.
-#     secret_arn: "arn:aws:secretsmanager:<region>:<account>:secret:<name>" # (Required) ARN of the existing AWS Secrets Manager secret.
-#     kms_key_arn: "arn:aws:kms:<region>:<account>:key/<key-id>" # (Optional) Customer-managed KMS key ARN needed when the supplied secret uses one. Default: AWS-managed key.
+#     secret_arn: "arn:aws:secretsmanager:<region>:<account>:secret:<name>" # (Required) Plan-time-known name or ARN of the existing AWS Secrets Manager secret. Its ARN and KMS key are resolved automatically.
 #   openai:                        # (Required when type is openai) Existing OpenAI project and service-account identifiers.
 #     project_id: "proj_..."       # (Required) OpenAI project that owns the workload API key.
 #     service_account_id: "svc_acct_..." # (Required) Existing service account for replacement-key creation.
@@ -60,11 +59,13 @@ variable "settings" {
   default     = {}
 
   validation {
-    condition = !contains(["openai", "openrouter"], try(var.settings.type, "")) || can(regex(
-      "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+",
-      try(var.settings.management_api_key.secret_arn, "")
-    ))
-    error_message = "For OpenAI or OpenRouter, settings.management_api_key.secret_arn must be an existing Secrets Manager secret ARN."
+    condition     = !contains(["openai", "openrouter"], try(var.settings.type, "")) || try(length(trimspace(var.settings.management_api_key.secret_arn)) > 0, false)
+    error_message = "For OpenAI or OpenRouter, settings.management_api_key.secret_arn must be an existing Secrets Manager secret name or ARN."
+  }
+
+  validation {
+    condition     = !contains(["openai", "openrouter"], try(var.settings.type, "")) || try(var.settings.management_api_key.kms_key_arn, null) == null
+    error_message = "settings.management_api_key.kms_key_arn is not supported; the module resolves the management secret's KMS key automatically."
   }
 
   validation {

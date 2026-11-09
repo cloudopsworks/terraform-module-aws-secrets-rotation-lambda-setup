@@ -44,7 +44,7 @@ We have [*lots of terraform modules*][terraform_modules] that are Open Source an
 
 ## Introduction
 
-This module creates the AWS Lambda function, execution role, CloudWatch log group, optional VPC networking, and supporting IAM policies required to run Secrets Manager rotation workflows. Database integrations use engine-specific dependencies and may support single-user or alternating-users patterns. OpenAI and OpenRouter API-key rotation is single-user only. For those integrations, supply an existing AWS Secrets Manager secret containing the upstream management credential. The module injects its ARN into the Lambda environment and grants read access; it does not create, populate, or manage that secret or its plaintext value. The rotated workload-key secret and its rotation schedule are managed separately.
+This module creates the AWS Lambda function, execution role, CloudWatch log group, optional VPC networking, and supporting IAM policies required to run Secrets Manager rotation workflows. Database integrations use engine-specific dependencies and may support single-user or alternating-users patterns. OpenAI and OpenRouter API-key rotation is single-user only. For those integrations, supply an existing AWS Secrets Manager secret containing the upstream management credential by name or ARN. The module resolves its ARN and KMS key, injects the ARN into the Lambda environment, and grants read access; it does not create, populate, or manage that secret or its plaintext value. The rotated workload-key secret and its rotation schedule are managed separately.
 
 ## Usage
 
@@ -181,8 +181,7 @@ settings:
   # Each new version keeps the provider key ID and a bounded predecessor trace; no key value enters Terraform state.
   # api_key_name: rotated-api-key # (Optional) Replacement key name. Default: rotated-api-key.
   # management_api_key: # (Required for openai/openrouter) Pre-existing management key secret.
-  #   secret_arn: arn:aws:secretsmanager:us-east-1:111122223333:secret:app/management-AbCdEf # (Required) ARN of the supplied secret.
-  #   kms_key_arn: arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012 # (Optional) Customer-managed KMS key ARN when the supplied secret uses one.
+  #   secret_arn: app/management # (Required) Existing secret name or ARN. The module resolves its ARN and KMS key automatically.
   # openai: # (Required when type is openai) Existing OpenAI project and service account.
   #   project_id: proj_123 # (Required) OpenAI project ID.
   #   service_account_id: svc_acct_123 # (Required) OpenAI service-account ID.
@@ -232,7 +231,7 @@ vpc:
 **OpenAI and OpenRouter key rotation**
 
 1. Obtain an OpenAI organization admin key or an OpenRouter management key through the upstream provider. This privileged key is separate from the workload key being rotated. OpenAI requires an existing project and service account; the module does not create either.
-2. Create and populate the management-key secret **outside this module** before applying. It must have an `AWSCURRENT` string version containing `{"api_key":"<upstream management key>"}`. Set `settings.management_api_key.secret_arn` to this existing AWS secret ARN. If it uses a customer-managed KMS key, also set `settings.management_api_key.kms_key_arn` so the Lambda can decrypt it. Do not put live credentials in `inputs.yaml`, command-line arguments, or shell history.
+2. Create and populate the management-key secret **outside this module** before planning. It must have an `AWSCURRENT` string version containing `{"api_key":"<upstream management key>"}`. Set `settings.management_api_key.secret_arn` to its existing, plan-time-known name or full ARN. The module resolves the canonical ARN and, when the secret uses a customer-managed KMS key, grants decrypt on the key found through the secret data source. Remove any previous `settings.management_api_key.kms_key_arn` input; it is rejected because the key is inferred. The Terraform deployment identity must be able to read the secret's metadata and resource policy and describe its KMS key; the key policy must also allow the Lambda role to decrypt. Do not put live credentials in `inputs.yaml`, command-line arguments, or shell history.
 3. Set `settings.type` to `openai` or `openrouter`, set `settings.multi_user: false`, and include the target secret ARN in `settings.allowed_secrets`. For OpenAI, also set `settings.openai.project_id` and `settings.openai.service_account_id`.
 4. Seed the separate target secret outside Terraform with its current workload key **and upstream ID**. For OpenAI use `{"api_key":"<current key>","api_key_id":"<OpenAI key ID>","provider":"openai","project_id":"<project ID>","service_account_id":"<service-account ID>"}`. For OpenRouter use `{"api_key":"<current key>","api_key_id":"<OpenRouter key hash>","provider":"openrouter"}`. The OpenAI identity fields must match `settings.openai`; a mismatch fails closed rather than deleting a key in the wrong project. Apply the Terragrunt unit; the module sets `MANAGEMENT_SECRET_ARN` in the Lambda environment and grants read access to the supplied secret, but never creates or mutates it.
 5. Configure the target secret's Secrets Manager rotation schedule to invoke the output `lambda_arn`; this module deploys the Lambda but does not create the target secret or schedule. The Lambda creates a pending workload key, validates it, promotes it to `AWSCURRENT`, then revokes the previous upstream key. Revocation follows promotion without a grace period; consumers must refresh `AWSCURRENT` promptly or retry authentication after refreshing.
@@ -259,7 +258,7 @@ API-key rotation also requires outbound HTTPS access to `api.openai.com` or `ope
 3. Answer the scaffold prompts (`vpc_module_enabled`, `vpc_module_path`, `vpc_subnet_type`) to configure VPC dependency injection.
 4. Edit `inputs.yaml` — select a database engine, `openai`, or `openrouter`; configure `allowed_secrets` and `allowed_kms`, and adjust `vpc` settings if not using module injection.
 5. Run `terragrunt hcl fmt`, then `terragrunt plan` and `terragrunt apply` from the unit directory.
-6. For API-key rotation, provide an existing populated management secret ARN, seed the separate target secret outside Terraform, then enable the target secret's rotation schedule. Confirm workload-key read scope and outbound HTTPS egress before the first rotation.
+6. For API-key rotation, provide an existing populated management secret name or ARN, seed the separate target secret outside Terraform, then enable the target secret's rotation schedule. Confirm workload-key read scope and outbound HTTPS egress before the first rotation.
 
 
 ## Examples
@@ -299,7 +298,7 @@ vpc:
   create_security_group: true
 ```
 
-**OpenAI service-account key** — `management_api_key.secret_arn` points to an existing AWS secret containing an OpenAI admin key; the module does not create it. `project_id` and `service_account_id` identify the existing account whose workload key is replaced. The service-account key needs `api.model.read` for the module's validation call. Set `scopes` and `expires_in_seconds` to match the workload-key policy rather than relying on provider defaults.
+**OpenAI service-account key** — `management_api_key.secret_arn` accepts the name or ARN of an existing AWS secret containing an OpenAI admin key; the module does not create it. `project_id` and `service_account_id` identify the existing account whose workload key is replaced. The service-account key needs `api.model.read` for the module's validation call. Set `scopes` and `expires_in_seconds` to match the workload-key policy rather than relying on provider defaults.
 
 ```yaml
 settings:
@@ -307,8 +306,7 @@ settings:
   multi_user: false
   api_key_name: app-service-key
   management_api_key:
-    secret_arn: arn:aws:secretsmanager:us-east-1:111122223333:secret:app/openai-rotation-admin-AbCdEf
-    kms_key_arn: arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
+    secret_arn: app/openai-rotation-admin
   openai:
     project_id: proj_123
     service_account_id: svc_acct_123
@@ -398,7 +396,9 @@ Available targets:
 | [aws_iam_policy_document.management_api_key](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.management_api_key_kms](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.vpc_ec2](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_kms_key.management_api_key](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/kms_key) | data source |
 | [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
+| [aws_secretsmanager_secret.management_api_key](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/secretsmanager_secret) | data source |
 | [aws_subnet.lambda_sub](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/subnet) | data source |
 
 ## Inputs
