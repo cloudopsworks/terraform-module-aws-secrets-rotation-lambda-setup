@@ -2,7 +2,7 @@
 
 The management credential is stored in a separate secret. The rotated secret
 contains ``api_key`` and ``api_key_id`` (OpenRouter's key hash), plus a bounded
-link to the predecessor version. Existing secret fields are preserved.
+link to the predecessor version. Non-expiration key parameters are retained.
 """
 
 import json
@@ -91,9 +91,13 @@ def check_secret(secret, provider, check_environment=False):
         if check_environment and (project != os.environ["OPENAI_PROJECT_ID"] or
                                   account != os.environ["OPENAI_SERVICE_ACCOUNT_ID"]):
             raise ValueError("OpenAI key secret binding differs from configuration")
-    elif "workspace_id" in secret and (not isinstance(secret["workspace_id"], str) or
-                                         not secret["workspace_id"]):
-        raise ValueError("OpenRouter key secret has an invalid workspace ID")
+        scopes = secret.get("scopes")
+        if not isinstance(scopes, list) or any(not isinstance(scope, str) or not scope for scope in scopes):
+            raise ValueError("OpenAI key secret must record its scopes")
+        if not isinstance(secret.get("name"), str) or not secret["name"]:
+            raise ValueError("OpenAI key secret must record its name")
+    else:
+        openrouter_keys.key_options(secret)
 
 
 def audit(action, provider, arn, version_id, key_id, secret):
@@ -143,20 +147,26 @@ def create_secret(secrets, arn, token, provider):
     except secrets.exceptions.ResourceNotFoundException:
         pass
     admin_key = management_key(secrets)
+    parameters = PROVIDERS[provider].key_options(current)
     if provider == "openrouter":
         key, key_id, requested_workspace, returned_workspace = openrouter_keys.create_key(
-            admin_key, token, current.get("workspace_id"))
+            admin_key, token, current.get("workspace_id"), parameters)
     else:
-        key, key_id = openai_keys.create_key(admin_key, token)
+        key, key_id = openai_keys.create_key(admin_key, token, parameters)
     pending = {
         **current, "api_key": key, "api_key_id": key_id, "provider": provider,
         "rotation": {"previous_version_id": current_version, "previous_api_key_id": current["api_key_id"]},
     }
+    pending.pop("expires_at", None)
+    pending.pop("expires_in_seconds", None)
+    pending.update(parameters)
     workspace_error = None
     if provider == "openrouter":
         if returned_workspace is not None and (not isinstance(returned_workspace, str) or not returned_workspace):
             workspace_error = "workspace_invalid"
         elif requested_workspace is not None and returned_workspace != requested_workspace:
+            workspace_error = "workspace_mismatch"
+        elif "workspace_id" in current and current["workspace_id"] is None and returned_workspace is not None:
             workspace_error = "workspace_mismatch"
     if workspace_error:
         audit("issued", provider, arn, token, key_id, pending)
@@ -218,9 +228,15 @@ def finish_secret(secrets, arn, token, provider, metadata):
     if provider == "openai" and (previous["project_id"] != pending["project_id"] or
                                  previous["service_account_id"] != pending["service_account_id"]):
         raise ValueError("OpenAI previous key binding differs from pending")
+    if provider == "openai" and previous["scopes"] != pending["scopes"]:
+        raise ValueError("OpenAI previous key scopes differ from pending")
     if provider == "openrouter" and previous.get("workspace_id") is not None and \
             previous["workspace_id"] != pending.get("workspace_id"):
         raise ValueError("OpenRouter previous key workspace differs from pending")
+    if provider == "openrouter" and any(
+            key not in pending or previous[key] != pending[key]
+            for key in openrouter_keys.KEY_OPTIONS if key in previous):
+        raise ValueError("OpenRouter previous key options differ from pending")
     versions = metadata["VersionIdsToStages"]
     if "AWSCURRENT" not in versions.get(token, []):
         current, current_version = get_secret_version(secrets, arn, VersionStage="AWSCURRENT")

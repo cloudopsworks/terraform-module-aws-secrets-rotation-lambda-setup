@@ -177,24 +177,28 @@ settings:
   # JSON {"api_key":"<upstream management credential>"}; this module never creates or updates it.
   # Never put the management key value in Terraform inputs.
   # Seed the external target secret separately. OpenAI needs api_key, api_key_id, provider: openai,
-  # project_id, and service_account_id; OpenRouter needs api_key, api_key_id (the key hash),
-  # provider: openrouter, and workspace_id when the existing key belongs to a workspace.
-  # Each new version keeps the provider key ID and a bounded predecessor trace; no key value enters Terraform state.
-  # api_key_name: rotated-api-key # (Optional) Replacement key name. Default: rotated-api-key.
+  # project_id, service_account_id, name, and scopes; OpenRouter needs api_key, api_key_id (the key hash),
+  # provider: openrouter, and all existing key options (name, limit, limit_reset,
+  # include_byok_in_limit, creator_user_id, workspace_id). Use workspace_id: null as a
+  # no-workspace marker; it is omitted from the create request and verified in the response.
+  # Missing key options fail rotation; settings cannot silently replace them. Expiration is not copied.
+  # Each new version keeps the provider key ID, effective non-expiration options, and a bounded
+  # predecessor trace; no key value enters Terraform state.
+  # api_key_name: rotated-api-key # (Optional) Legacy setting ignored for API-key rotation; target-secret name is required.
   # management_api_key: # (Required for openai/openrouter) Pre-existing management key secret.
   #   secret_arn: app/management # (Required) Existing secret name or ARN. The module resolves its ARN and KMS key automatically.
   # openai: # (Required when type is openai) Existing OpenAI project and service account.
   #   project_id: proj_123 # (Required) OpenAI project ID.
   #   service_account_id: svc_acct_123 # (Required) OpenAI service-account ID.
-  #   scopes: ["<scope>"] # (Optional) Replacement-key scopes; set to match the existing key policy. Default: OpenAI API default.
+  #   scopes: ["<scope>"] # (Optional) Legacy setting ignored; required scopes come from the target secret.
   #   expires_in_seconds: 2592000 # (Optional) Lifetime in seconds, 1 through 31536000, or null for no expiry. Default: OpenAI API default.
-  # openrouter: # (Optional when type is openrouter) New key options.
-  #   limit: 10.0 # (Optional) USD spending cap, nonnegative and less than 1000000. Default: provider default.
-  #   limit_reset: daily # (Optional) Reset interval: daily, weekly, monthly, or null. Default: none.
-  #   include_byok_in_limit: false # (Optional) Include BYOK usage in cap. Default: provider default.
+  # openrouter: # (Optional when type is openrouter) New expiration and legacy key settings.
+  #   limit: 10.0 # (Optional) Legacy setting ignored; required limit comes from the target secret.
+  #   limit_reset: daily # (Optional) Legacy setting ignored; required reset interval comes from the target secret.
+  #   include_byok_in_limit: false # (Optional) Legacy setting ignored; required value comes from the target secret.
   #   expires_at: "2027-01-01T00:00:00Z" # (Optional) UTC ISO-8601 expiration with seconds. Default: provider default.
-  #   workspace_id: 00000000-0000-0000-0000-000000000000 # (Optional) Workspace UUID fallback when the target secret lacks workspace_id; the secret wins when both are set.
-  #   creator_user_id: user_123 # (Optional) Creator user ID. Default: provider default.
+  #   workspace_id: 00000000-0000-0000-0000-000000000000 # (Optional) Legacy setting ignored; required workspace_id comes from the target secret.
+  #   creator_user_id: user_123 # (Optional) Legacy setting ignored; required creator_user_id comes from the target secret.
   # OpenRouter external keys are not supported: never put an external API key in Terraform inputs.
   log_retention_days: 14 # (Optional) CloudWatch Logs retention in days. Default: 14.
   logging: # (Optional) Lambda advanced logging configuration.
@@ -234,14 +238,14 @@ vpc:
 1. Obtain an OpenAI organization admin key or an OpenRouter management key through the upstream provider. This privileged key is separate from the workload key being rotated. OpenAI requires an existing project and service account; the module does not create either.
 2. Create and populate the management-key secret **outside this module** before planning. It must have an `AWSCURRENT` string version containing `{"api_key":"<upstream management key>"}`. Set `settings.management_api_key.secret_arn` to its existing, plan-time-known name or full ARN. The module resolves the canonical ARN and, when the secret uses a customer-managed KMS key, grants decrypt on the key found through the secret data source. Remove any previous `settings.management_api_key.kms_key_arn` input; it is rejected because the key is inferred. The Terraform deployment identity must be able to read the secret's metadata and resource policy and describe its KMS key; the key policy must also allow the Lambda role to decrypt. Do not put live credentials in `inputs.yaml`, command-line arguments, or shell history.
 3. Set `settings.type` to `openai` or `openrouter`, set `settings.multi_user: false`, and include the target secret ARN in `settings.allowed_secrets`. For OpenAI, also set `settings.openai.project_id` and `settings.openai.service_account_id`.
-4. Seed the separate target secret outside Terraform with its current workload key **and upstream ID**. For OpenAI use `{"api_key":"<current key>","api_key_id":"<OpenAI key ID>","provider":"openai","project_id":"<project ID>","service_account_id":"<service-account ID>"}`. For OpenRouter use `{"api_key":"<current key>","api_key_id":"<OpenRouter key hash>","provider":"openrouter","workspace_id":"<existing key's workspace UUID>"}` when the key belongs to a workspace; omit `workspace_id` for a key without known workspace ownership. The OpenAI identity fields must match `settings.openai`; a mismatch fails closed rather than deleting a key in the wrong project. Apply the Terragrunt unit; the module sets `MANAGEMENT_SECRET_ARN` in the Lambda environment and grants read access to the supplied secret, but never creates or mutates it.
+4. Seed the separate target secret outside Terraform with its current workload key, upstream ID, and non-expiration key parameters. For OpenAI use `{"api_key":"<current key>","api_key_id":"<OpenAI key ID>","provider":"openai","project_id":"<project ID>","service_account_id":"<service-account ID>","name":"<existing name>","scopes":["api.model.read"]}`. Both `name` and `scopes` are required; [OpenAI's key-retrieval response](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/projects/subresources/api_keys/methods/retrieve) does not expose scopes, so verify them before seeding. For OpenRouter use `{"api_key":"<current key>","api_key_id":"<OpenRouter key hash>","provider":"openrouter","name":"<existing name>","limit":0,"limit_reset":null,"include_byok_in_limit":false,"creator_user_id":null,"workspace_id":null}`. Use a string creator ID and workspace UUID instead of `null` when the existing key has them. All six non-expiration OpenRouter fields are required to prevent settings or provider defaults from silently changing policy; [OpenRouter's key-retrieval response](https://openrouter.ai/docs/api/api-reference/api-keys/get-a-single-api-key) exposes them. An explicit `workspace_id:null` is a secret marker for no workspace: it is omitted from the [create request](https://openrouter.ai/docs/api/api-reference/api-keys/create-a-new-api-key), and rotation fails if the provider assigns a workspace. The OpenAI identity fields must match `settings.openai`; a mismatch fails closed rather than deleting a key in the wrong project. Apply the Terragrunt unit; the module sets `MANAGEMENT_SECRET_ARN` in the Lambda environment and grants read access to the supplied secret, but never creates or mutates it.
 5. Configure the target secret's Secrets Manager rotation schedule to invoke the output `lambda_arn`; this module deploys the Lambda but does not create the target secret or schedule. The Lambda creates a pending workload key, validates it, promotes it to `AWSCURRENT`, then revokes the previous upstream key. Revocation follows promotion without a grace period; consumers must refresh `AWSCURRENT` promptly or retry authentication after refreshing.
 
-Each successful replacement is stored in the target secret's new version with its `api_key_id` (OpenRouter hash), `provider`, and a bounded `rotation` predecessor reference (`previous_version_id`, `previous_api_key_id`). OpenAI versions also retain their `project_id` and `service_account_id`; deletion uses the project stored with the previous key, not a later environment setting. For OpenRouter, `workspace_id` in the current target secret takes precedence over `settings.openrouter.workspace_id`, even when both are set; the provider-confirmed workspace is retained in the replacement version. If the provider omits or disagrees with a requested workspace, the Lambda attempts to revoke the new key and fails rotation before promotion; failed revocation can require manual cleanup. These identifiers are not Terraform outputs. The Lambda also emits best-effort lifecycle logs with provider and key IDs, but never key values; CloudWatch retention is controlled by `settings.log_retention_days`. Secrets Manager versions and CloudWatch retention are not an indefinite audit ledger.
+Each successful replacement is stored in the target secret's new version with its `api_key_id` (OpenRouter hash), `provider`, copied non-expiration key parameters, and a bounded `rotation` predecessor reference (`previous_version_id`, `previous_api_key_id`). The current workload secret is authoritative for non-expiration key parameters; legacy module settings for them are ignored. Old `expires_at` and `expires_in_seconds` fields are removed rather than copied. An explicitly configured **new** expiration in `settings.openrouter.expires_at` or `settings.openai.expires_in_seconds` is still sent on key creation. OpenAI versions also retain `project_id` and `service_account_id`; deletion uses the project stored with the previous key, not a later environment setting. For OpenRouter, `workspace_id` in the current target secret is used instead of `settings.openrouter.workspace_id`, including explicit `null`; the provider-confirmed workspace is retained in the replacement version. If the provider omits or disagrees with a requested workspace, the Lambda attempts to revoke the new key and fails rotation before promotion; failed revocation can require manual cleanup. These identifiers are not Terraform outputs. The Lambda also emits best-effort lifecycle logs with provider and key IDs, but never key values; CloudWatch retention is controlled by `settings.log_retention_days`. Secrets Manager versions and CloudWatch retention are not an indefinite audit ledger.
 
-Before upgrading an existing API-key rotation, complete or reconcile any in-flight `AWSPENDING` version: older pending versions lack the predecessor link required by this Lambda and cannot be modified in place. Do not invent predecessor metadata. Target versions must use `api_key_id`, not the earlier `key_id` field; verify the provider ID and replace the current value **outside Terraform** before enabling rotation. For an existing OpenAI `AWSCURRENT` target secret lacking `project_id` or `service_account_id`, verify the key's actual ownership upstream and write a new current value with those fields **outside Terraform** before enabling rotation. Do not guess them from the Lambda environment. The AWS Secrets Manager `VersionId` is not an OpenAI or OpenRouter key ID. Avoid concurrent manual staging-label changes during rotation; the current-version check and upstream revocation cannot be atomic across AWS and the provider.
+Before upgrading an existing API-key rotation, complete or reconcile any in-flight `AWSPENDING` version: older pending versions lack the predecessor link required by this Lambda and cannot be modified in place. Do not invent predecessor metadata. Target versions must use `api_key_id`, not the earlier `key_id` field; verify the provider ID and replace the current value **outside Terraform** before enabling rotation. For an existing OpenAI `AWSCURRENT` target secret lacking `project_id`, `service_account_id`, `name`, or `scopes`, verify the key's actual ownership and options and write a new current value with those fields **outside Terraform** before enabling rotation. Do not guess them from the Lambda environment. For OpenRouter, add all six non-expiration options from the current key to the target secret before rotation; missing options fail closed before key issuance. The AWS Secrets Manager `VersionId` is not an OpenAI or OpenRouter key ID. Avoid concurrent manual staging-label changes during rotation; the current-version check and upstream revocation cannot be atomic across AWS and the provider.
 
-OpenAI validation uses [`GET /v1/models`](https://developers.openai.com/api/reference/resources/models/methods/list); the service-account key and its project role must both allow [`api.model.read`](https://developers.openai.com/api/docs/guides/rbac). Set `settings.openai.scopes` and, if needed, `settings.openai.expires_in_seconds` to preserve the intended least-privilege and expiry policy on each replacement key. OpenRouter validation uses [`GET /api/v1/key`](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key). Neither upstream create API documents an idempotency key: if a Lambda invocation stops after upstream creation but before the pending AWS version is saved, an orphaned upstream key may require manual cleanup. Key restrictions, spending limits, and expiration are not inherited automatically; configure replacement-key options deliberately.
+OpenAI validation uses [`GET /v1/models`](https://developers.openai.com/api/reference/resources/models/methods/list); the service-account key and its project role must both allow [`api.model.read`](https://developers.openai.com/api/docs/guides/rbac). Record the current key's scopes in the workload secret. OpenRouter validation uses [`GET /api/v1/key`](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key). Neither upstream create API documents an idempotency key: if a Lambda invocation stops after upstream creation but before the pending AWS version is saved, an orphaned upstream key may require manual cleanup. Expiration is intentionally not inherited; set a new expiry explicitly if required by policy. Provider default expiry behavior is not guaranteed by this module.
 
 API-key rotation also requires outbound HTTPS access to `api.openai.com` or `openrouter.ai`. If the Lambda is attached to private VPC subnets, provide NAT or equivalent egress.
 
@@ -299,21 +303,17 @@ vpc:
   create_security_group: true
 ```
 
-**OpenAI service-account key** — `management_api_key.secret_arn` accepts the name or ARN of an existing AWS secret containing an OpenAI admin key; the module does not create it. `project_id` and `service_account_id` identify the existing account whose workload key is replaced. The service-account key needs `api.model.read` for the module's validation call. Set `scopes` and `expires_in_seconds` to match the workload-key policy rather than relying on provider defaults.
+**OpenAI service-account key** — `management_api_key.secret_arn` accepts the name or ARN of an existing AWS secret containing an OpenAI admin key; the module does not create it. `project_id` and `service_account_id` identify the existing account whose workload key is replaced. The service-account key needs `api.model.read` for the module's validation call. Record its scopes in the external workload secret; set `expires_in_seconds` only when the new key needs a fresh lifetime.
 
 ```yaml
 settings:
   type: openai
   multi_user: false
-  api_key_name: app-service-key
   management_api_key:
     secret_arn: app/openai-rotation-admin
   openai:
     project_id: proj_123
     service_account_id: svc_acct_123
-    scopes:
-      - api.model.read
-      - api.responses.write
     expires_in_seconds: 2592000
   allowed_secrets:
     - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/openai-workload-AbCdEf
@@ -325,12 +325,10 @@ settings:
 settings:
   type: openrouter
   multi_user: false
-  api_key_name: app-router-key
   management_api_key:
     secret_arn: arn:aws:secretsmanager:us-east-1:111122223333:secret:app/openrouter-rotation-management-AbCdEf
   openrouter:
-    limit: 10.0
-    limit_reset: monthly
+    expires_at: "2027-01-01T00:00:00Z"
   allowed_secrets:
     - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/openrouter-workload-AbCdEf
 ```

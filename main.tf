@@ -28,11 +28,11 @@ locals {
   }
   openrouter_key_options = {
     for key, value in try(var.settings.openrouter, {}) : key => value
-    if contains(["limit", "limit_reset", "include_byok_in_limit", "expires_at", "workspace_id", "creator_user_id"], key)
+    if key == "expires_at"
   }
   openai_key_options = {
     for key, value in try(var.settings.openai, {}) : key => value
-    if contains(["scopes", "expires_in_seconds"], key)
+    if key == "expires_in_seconds"
   }
   variables = merge(
     { for item in try(var.settings.environment.variables, []) : item.name => item.value },
@@ -41,7 +41,6 @@ locals {
     local.api_key_rotation ? merge({
       API_PROVIDER          = var.settings.type
       MANAGEMENT_SECRET_ARN = local.management_secret_arn
-      ROTATION_KEY_NAME     = coalesce(try(var.settings.api_key_name, null), "rotated-api-key")
       }, var.settings.type == "openai" ? {
       OPENAI_PROJECT_ID         = try(var.settings.openai.project_id, "")
       OPENAI_SERVICE_ACCOUNT_ID = try(var.settings.openai.service_account_id, "")
