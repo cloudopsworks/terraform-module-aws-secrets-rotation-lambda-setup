@@ -80,9 +80,8 @@ def get_secret_version(secrets, arn, **version):
 
 
 def check_secret(secret, provider, check_environment=False):
-    if (secret.get("provider") != provider or not secret.get("api_key") or
-            not secret.get("api_key_id") or "key_id" in secret):
-        raise ValueError("Key secret is incomplete or for another provider")
+    if not secret.get("api_key") or not secret.get("api_key_id") or "key_id" in secret:
+        raise ValueError("Key secret is incomplete")
     if provider == "openai":
         project = secret.get("project_id")
         account = secret.get("service_account_id")
@@ -154,9 +153,10 @@ def create_secret(secrets, arn, token, provider):
     else:
         key, key_id = openai_keys.create_key(admin_key, token, parameters)
     pending = {
-        **current, "api_key": key, "api_key_id": key_id, "provider": provider,
+        **current, "api_key": key, "api_key_id": key_id,
         "rotation": {"previous_version_id": current_version, "previous_api_key_id": current["api_key_id"]},
     }
+    pending.pop("provider", None)
     pending.pop("expires_at", None)
     pending.pop("expires_in_seconds", None)
     pending.update(parameters)

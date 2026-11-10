@@ -32,7 +32,7 @@ class FakeSecrets:
     exceptions = types.SimpleNamespace(ResourceNotFoundException=NotFound)
 
     def __init__(self):
-        self.values = {"current": {"api_key": "old-workload", "api_key_id": "old-id", "provider": "openai",
+        self.values = {"current": {"api_key": "old-workload", "api_key_id": "old-id",
                                    "project_id": "proj_123", "service_account_id": "svc_456",
                                    "scopes": ["api.model.read"], "name": "worker-token-12"}}
         self.stages = {"current": ["AWSCURRENT"], "token-123456789": ["AWSPENDING"]}
@@ -84,7 +84,7 @@ class FakeSecrets:
 class RotationTests(unittest.TestCase):
     def router_current(self, **changes):
         value = {
-            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+            "api_key": "old-workload", "api_key_id": "old-id",
             "name": "worker-token-12", "limit": 10, "limit_reset": "monthly",
             "include_byok_in_limit": False, "creator_user_id": None, "workspace_id": None,
         }
@@ -126,11 +126,25 @@ class RotationTests(unittest.TestCase):
             "management-credential", {"name": "worker-token-12", "scopes": ["api.model.read"]},
         ))
         self.assertEqual(self.secrets.values["token-123456789"], {
-            "api_key": "new-workload", "api_key_id": "new-id", "provider": "openai",
+            "api_key": "new-workload", "api_key_id": "new-id",
             "project_id": "proj_123", "service_account_id": "svc_456", "scopes": ["api.model.read"],
             "name": "worker-token-12",
             "rotation": {"previous_version_id": "current", "previous_api_key_id": "old-id"},
         })
+
+    def test_openai_uses_configured_provider_without_secret_field(self):
+        self.secrets.values["current"]["provider"] = "openrouter"  # Legacy field is inert.
+        with patch.object(openai_keys, "call_api", return_value={"value": "new-workload", "id": "new-id"}):
+            rotation.rotate(self.event, self.secrets)
+        self.assertNotIn("provider", self.secrets.values["token-123456789"])
+
+    def test_openrouter_uses_configured_provider_without_secret_field(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        self.secrets.values["current"] = self.router_current()
+        response = {"key": "new-workload", "data": {"hash": "new-id", "workspace_id": None}}
+        with patch.object(openrouter_keys, "call_api", return_value=response):
+            rotation.rotate(self.event, self.secrets)
+        self.assertNotIn("provider", self.secrets.values["token-123456789"])
 
     def test_openai_create_passes_scopes_and_expiration(self):
         os.environ["OPENAI_KEY_OPTIONS_JSON"] = json.dumps({
@@ -203,7 +217,7 @@ class RotationTests(unittest.TestCase):
             "workspace_id": "configured-workspace", "expires_at": "2028-01-01T00:00:00Z",
         })
         self.secrets.values["current"] = {
-            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+            "api_key": "old-workload", "api_key_id": "old-id",
             "name": "existing-name", "limit": 0, "limit_reset": None,
             "include_byok_in_limit": False, "workspace_id": None,
             "creator_user_id": "existing-user", "expires_at": "2026-01-01T00:00:00Z",
@@ -273,7 +287,7 @@ class RotationTests(unittest.TestCase):
         os.environ["API_PROVIDER"] = "openrouter"
         os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"workspace_id":"configured-workspace"}'
         self.secrets.values["current"] = {
-            "api_key": "old-workload", "api_key_id": "old-id", "provider": "openrouter",
+            "api_key": "old-workload", "api_key_id": "old-id",
         }
         with patch.object(openrouter_keys, "create_key") as create:
             with self.assertRaisesRegex(ValueError, "record all key options"):
@@ -476,32 +490,31 @@ class RotationTests(unittest.TestCase):
         delete.assert_not_called()
         self.assertEqual(self.secrets.stages["current"], ["AWSCURRENT"])
 
-    def test_finish_rejects_cross_provider_or_unidentified_previous_key(self):
+    def test_finish_ignores_legacy_provider_field_but_rejects_unidentified_previous_key(self):
         self.secrets.values["token-123456789"] = self.pending()
         self.event["Step"] = "finishSecret"
         self.secrets.values["current"]["provider"] = "openrouter"
         with patch.object(openai_keys, "delete_key") as delete:
-            with self.assertRaisesRegex(ValueError, "Key secret"):
-                rotation.rotate(self.event, self.secrets)
-        delete.assert_not_called()
-        self.assertEqual(self.secrets.stages["current"], ["AWSCURRENT"])
+            rotation.rotate(self.event, self.secrets)
+        delete.assert_called_once_with("management-credential", "old-id", "proj_123")
+        self.assertEqual(self.secrets.stages["token-123456789"], ["AWSCURRENT"])
 
         self.secrets.stages = {"current": ["AWSCURRENT"], "token-123456789": ["AWSPENDING"]}
-        self.secrets.values["current"] = {"api_key": "old-workload", "provider": "openai"}
+        self.secrets.values["current"] = {"api_key": "old-workload"}
         with patch.object(openai_keys, "delete_key") as delete:
             with self.assertRaisesRegex(ValueError, "Key secret"):
                 rotation.rotate(self.event, self.secrets)
         delete.assert_not_called()
 
-    def test_create_rejects_unidentified_or_other_provider_current_key(self):
+    def test_create_rejects_unidentified_or_unbound_current_key(self):
         self.secrets.values["current"].pop("api_key_id")
         with patch.object(openai_keys, "create_key") as create:
             with self.assertRaisesRegex(ValueError, "Key secret"):
                 rotation.rotate(self.event, self.secrets)
         create.assert_not_called()
-        self.secrets.values["current"] = {"api_key": "old", "api_key_id": "old-id", "provider": "openrouter"}
+        self.secrets.values["current"] = {"api_key": "old", "api_key_id": "old-id"}
         with patch.object(openai_keys, "create_key") as create:
-            with self.assertRaisesRegex(ValueError, "Key secret"):
+            with self.assertRaisesRegex(ValueError, "project or service account"):
                 rotation.rotate(self.event, self.secrets)
         create.assert_not_called()
 
@@ -640,6 +653,13 @@ class RotationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 rotation.rotate(self.event, self.secrets)
         api.assert_not_called()
+
+    def test_unsupported_configured_provider_fails_before_secret_access(self):
+        os.environ["API_PROVIDER"] = "other"
+        with patch.object(self.secrets, "describe_secret") as describe:
+            with self.assertRaisesRegex(ValueError, "Unsupported API provider"):
+                rotation.rotate(self.event, self.secrets)
+        describe.assert_not_called()
 
     def test_delete_treats_already_absent_upstream_key_as_success(self):
         missing = HTTPError("https://api.openai.com", 404, "Not Found", {}, io.BytesIO(b"private"))

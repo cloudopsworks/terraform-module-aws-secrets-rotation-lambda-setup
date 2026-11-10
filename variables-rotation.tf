@@ -26,7 +26,8 @@
 #         value: var_value        # (Required) Environment variable value.
 #   allowed_secrets:              # (Optional) Secrets Manager secret ARNs the rotation function may read and update.
 #     - arn:aws:secretsmanager:<region>:<account>:secret:<name>
-#   # The external target secret must contain api_key, api_key_id, and provider. OpenAI targets also require
+#   # The external target secret must contain api_key and api_key_id. Provider selection comes only from
+#   # settings.type; no provider field is needed in the secret. OpenAI targets also require
 #   # project_id, service_account_id, name, and scopes matching the current OpenAI key. OpenRouter targets
 #   # must record all non-expiration key options: name, limit, limit_reset, include_byok_in_limit,
 #   # creator_user_id, and workspace_id (null marks no workspace and is omitted from the create request).

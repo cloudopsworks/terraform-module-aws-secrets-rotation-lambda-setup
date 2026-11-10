@@ -12,11 +12,12 @@ settings:
   # For type: openai or openrouter, supply a pre-existing AWS Secrets Manager secret containing
   # JSON {"api_key":"<upstream management credential>"}; this module never creates or updates it.
   # Never put the management key value in Terraform inputs.
-  # Seed the external target secret separately. OpenAI needs api_key, api_key_id, provider: openai,
+  # Seed the external target secret separately. OpenAI needs api_key, api_key_id,
   # project_id, service_account_id, name, and scopes; OpenRouter needs api_key, api_key_id (the key hash),
-  # provider: openrouter, and all existing key options (name, limit, limit_reset,
+  # and all existing key options (name, limit, limit_reset,
   # include_byok_in_limit, creator_user_id, workspace_id). Use workspace_id: null as a
   # no-workspace marker; it is omitted from the create request and verified in the response.
+  # Provider selection comes only from settings.type; no provider field is needed in the secret.
   # Missing key options fail rotation; settings cannot silently replace them. Expiration is not copied.
   # Each new version keeps the provider key ID, effective non-expiration options, and a bounded
   # predecessor trace; no key value enters Terraform state.
