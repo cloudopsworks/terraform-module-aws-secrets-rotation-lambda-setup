@@ -122,10 +122,15 @@ def check_credential(value, *, bootstrap_allowed=False, stages=()):
     key, key_id = value.get("api_key"), value.get("api_key_id")
     if key is None or key_id == BOOTSTRAP_ID:
         if (not bootstrap_allowed or "TFBOOTSTRAP" not in stages or
-                set(value) != {"api_key", "api_key_id"} or
                 key is not None or key_id != BOOTSTRAP_ID):
-            raise ValueError("Malformed admin bootstrap credential")
-        return "admin_new"
+            raise ValueError("Malformed OpenAI bootstrap credential")
+        if set(value) == {"api_key", "api_key_id"}:
+            return "admin_new"
+        if (set(value) == CREDENTIAL_FIELDS and value["key_type"] == "project" and
+                all(isinstance(value[field], str) and value[field]
+                    for field in ("name", "project_id", "service_account_id"))):
+            return "project_new"
+        raise ValueError("Malformed OpenAI bootstrap credential")
     if set(value) != CREDENTIAL_FIELDS or any(
             not isinstance(value[field], str) or not value[field]
             for field in ("api_key", "api_key_id", "name")):
@@ -209,11 +214,14 @@ def check_snapshot(snapshot, arn, token):
              (ttl != snapshot["config"]["expires_in_seconds"] or safety != 0))):
         raise ValueError("Rotation lifetime snapshot is invalid")
     kind, previous_id = snapshot["bootstrap_kind"], snapshot["previous_api_key_id"]
-    if kind not in ("admin_new", "project_existing", "existing"):
+    if kind not in ("admin_new", "project_new", "project_existing", "existing"):
         raise ValueError("Rotation predecessor kind is invalid")
     if kind == "admin_new":
         if previous_id is not None or snapshot["config"]["key_type"] != "admin":
             raise ValueError("Admin bootstrap snapshot is invalid")
+    elif kind == "project_new":
+        if previous_id is not None or snapshot["config"]["key_type"] != "project":
+            raise ValueError("Project bootstrap snapshot is invalid")
     elif not isinstance(previous_id, str) or not previous_id or previous_id == BOOTSTRAP_ID:
         raise ValueError("Rotation predecessor ID is invalid")
     if snapshot["previous_key_type"] != snapshot["config"]["key_type"]:
@@ -269,7 +277,7 @@ def check_provider_key(details, snapshot, key_id, *, require_lifetime=True):
             raise ValueError("OpenAI service-account role changed")
     if require_lifetime:
         expires_at = details.get("expires_at")
-        if (type(expires_at) not in (int, float) or
+        if (type(expires_at) not in (int, float) or not math.isfinite(expires_at) or
                 expires_at <= utcnow().timestamp() + snapshot["expiry_safety_seconds"]):
             raise ValueError("OpenAI key expiration is missing or too near")
 
@@ -328,12 +336,15 @@ def create_secret(secrets, metadata, event):
     current, previous_version_id = read_json(secrets, arn, VersionStage="AWSCURRENT")
     stages = metadata["VersionIdsToStages"].get(previous_version_id, ())
     kind = check_credential(current, bootstrap_allowed=True, stages=stages)
-    if kind == "admin_new":
-        if config["key_type"] != "admin":
-            raise ValueError("Admin bootstrap conflicts with TFCONFIG")
+    if kind in ("admin_new", "project_new"):
+        if (config["key_type"] != ("admin" if kind == "admin_new" else "project") or
+                (kind == "project_new" and any(current[field] != config[field]
+                 for field in ("name", "project_id", "service_account_id")))):
+            raise ValueError("Bootstrap identity conflicts with TFCONFIG")
         previous_id = None
-        previous_type = "admin"
-        previous_project = previous_account = None
+        previous_type = config["key_type"]
+        previous_project = config["project_id"]
+        previous_account = config["service_account_id"]
     else:
         if (current["key_type"] != config["key_type"] or
                 current["project_id"] != config["project_id"] or
@@ -444,7 +455,7 @@ def finish_secret(secrets, metadata, token):
     previous_stages = metadata["VersionIdsToStages"].get(previous_id, ())
     kind = check_credential(previous, bootstrap_allowed=True, stages=previous_stages)
     if (kind != snapshot["bootstrap_kind"] or previous.get("api_key_id") != (
-            BOOTSTRAP_ID if kind == "admin_new" else snapshot["previous_api_key_id"]) or
+            BOOTSTRAP_ID if kind in ("admin_new", "project_new") else snapshot["previous_api_key_id"]) or
             (kind != "admin_new" and (
                 previous["key_type"] != snapshot["previous_key_type"] or
                 previous["project_id"] != snapshot["previous_project_id"] or
@@ -465,7 +476,7 @@ def finish_secret(secrets, metadata, token):
     current, current_version = read_json(secrets, arn, VersionStage="AWSCURRENT")
     if current_version != token or current != pending:
         raise ValueError("Promoted credential differs from saved pending version")
-    if kind != "admin_new":
+    if kind not in ("admin_new", "project_new"):
         admin_key, organization_id = management_key(secrets, arn, previous["api_key"])
         openai_keys.delete_key(admin_key, snapshot["config"], snapshot["previous_api_key_id"], organization_id)
         LOG.info("openai_rotation retired secret_id=%s version_id=%s key_id=%s", arn, previous_id, snapshot["previous_api_key_id"])

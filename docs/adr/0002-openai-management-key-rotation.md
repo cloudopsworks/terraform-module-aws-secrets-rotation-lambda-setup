@@ -58,3 +58,9 @@ The explicit `AWSPENDING` cleanup follows the requested secret-label contract, e
 ## Amendment: IAM-only target scope
 
 The initial implementation also copied `allowed_secrets` into `ENROLLED_SECRET_ARNS_JSON` and required exact ARNs at runtime. This duplicated IAM policy, rejected legitimate IAM wildcard scopes, and made an unrelated KMS ARN in the input fail every OpenAI rotation before provider access. The runtime copy is removed; IAM remains the resource authorization boundary. `MANAGEMENT_SECRET_ARN` remains the one explicit runtime secret-identity exclusion. Exact target ARNs remain the least-privilege recommendation, and KMS ARNs belong in `allowed_kms`, not `allowed_secrets`.
+
+## Amendment: keyless project bootstrap and mandatory expiry
+
+A new project target may replace the real-key bootstrap in decision 6 with the exact six-field project payload, setting `api_key` to null and `api_key_id` to `__CREATE_NEW__` on the same `AWSCURRENT`/`TFBOOTSTRAP` version. Name, project ID, and service-account ID must match `TFCONFIG`. Terraform provisions only the account identity; Lambda creates the first expiring key and records no predecessor key to delete. Later rotations retire only the prior Lambda-issued key. Existing real-key project bootstraps remain accepted for migration.
+
+Every newly issued rotated key requires expiration. Null configured TTL means schedule-derived TTL, not nonexpiry. Provider metadata must confirm a finite timestamp beyond the safety bound before testing or promotion; null, NaN, and infinities fail closed. Offline regression tests cover initial issuance, successor issuance, and missing/nonfinite expiry. This amendment does not migrate existing secret payloads, stage labels, or upstream keys automatically.

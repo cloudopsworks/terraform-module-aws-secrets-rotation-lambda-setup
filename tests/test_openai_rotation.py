@@ -60,6 +60,14 @@ class OpenAIRotationTests(unittest.TestCase):
         self.secrets.stages["current"] = (["AWSCURRENT", "TFBOOTSTRAP"] if bootstrap
                                            else ["AWSCURRENT"])
 
+    def keyless_project(self, *, scopes=None, role="owner"):
+        self.project(scopes=scopes, role=role)
+        self.secrets.values["current"] = {
+            "key_type": "project", "api_key": None,
+            "api_key_id": "__CREATE_NEW__", "name": "resolved-key",
+            "project_id": "proj_123", "service_account_id": "svc_456",
+        }
+
     @staticmethod
     def credential(key_type, key, key_id, name, project_id=None, service_account_id=None):
         return {
@@ -143,6 +151,87 @@ class OpenAIRotationTests(unittest.TestCase):
         self.assertEqual(1, len(self.calls_for("POST")))
         self.assertIn("/service_accounts/svc_456/api_keys",
                       self.calls_for("POST")[0][1])
+
+    def test_keyless_project_bootstrap_creates_first_key_without_retirement(self):
+        self.keyless_project(scopes=["api.model.read"])
+        for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
+            self.rotate(step)
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+        self.assertEqual(["TFBOOTSTRAP", "AWSPREVIOUS"],
+                         self.secrets.stages["current"])
+        self.assertEqual("project", self.secrets.values[self.token]["key_type"])
+        self.assertEqual(self.new_value, self.secrets.values[self.token]["api_key"])
+        self.assertEqual([], self.calls_for("DELETE"))
+        self.assertEqual(1, len(self.calls_for("POST")))
+        self.rotate("finishSecret")
+        self.assertEqual([], self.calls_for("DELETE"))
+
+    def test_keyless_project_then_normal_rotation_retires_only_lambda_key(self):
+        self.keyless_project()
+        self.rotate("createSecret")
+        self.rotate("finishSecret")
+        self.token = "token-second-rotation"
+        self.secrets.stages[self.token] = ["AWSPENDING"]
+        self.new_id = "key_second"
+        self.new_value = "sk-second-workload"
+        self.rotate("createSecret")
+        self.rotate("finishSecret")
+        self.assertEqual("key_new", self.calls_for("DELETE")[0][1].rsplit("/", 1)[-1])
+        self.assertEqual(1, len(self.calls_for("DELETE")))
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+
+    def test_keyless_project_requires_matching_config_before_create(self):
+        self.keyless_project()
+        self.secrets.values["current"]["service_account_id"] = "svc_other"
+        with self.assertRaisesRegex(ValueError, "identity"):
+            self.rotate("createSecret")
+        self.assertEqual([], self.calls_for("POST"))
+
+    def test_keyless_project_and_successor_both_receive_schedule_derived_expiry(self):
+        self.config["expires_in_seconds"] = None
+        self.keyless_project()
+        self.secrets.rotation_rules = {"AutomaticallyAfterDays": 30}
+        for number in range(2):
+            with self.subTest(issuance=number):
+                if number:
+                    self.token = "token-second-rotation"
+                    self.secrets.stages[self.token] = ["AWSPENDING"]
+                    self.new_id = "key_second"
+                    self.new_value = "sk-second-workload"
+                self.rotate("createSecret")
+                self.assertEqual(2764800,
+                                 self.calls_for("POST")[-1][3]["expires_in_seconds"])
+                self.assertEqual(2764800,
+                                 self.intent()["snapshot"]["effective_ttl_seconds"])
+                for step in ("setSecret", "testSecret", "finishSecret"):
+                    self.rotate(step)
+                self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+        self.assertEqual(2, len(self.calls_for("POST")))
+        self.assertEqual(1, len(self.calls_for("DELETE")))
+
+    def test_keyless_project_without_confirmed_expiry_cannot_be_promoted(self):
+        self.keyless_project()
+        self.rotate("createSecret")
+        pending_values = copy.deepcopy(self.secrets.values)
+        pending_stages = copy.deepcopy(self.secrets.stages)
+        for expiry in (None, float("nan"), float("inf"), float("-inf")):
+            self.provider_expiry = expiry
+            for step in ("testSecret", "finishSecret"):
+                with self.subTest(expiry=expiry, step=step):
+                    self.secrets.values = copy.deepcopy(pending_values)
+                    self.secrets.stages = copy.deepcopy(pending_stages)
+                    with self.assertRaisesRegex(ValueError, "expiration"):
+                        self.rotate(step)
+                    self.assertIn("AWSCURRENT", self.secrets.stages["current"])
+                    self.assertEqual(["AWSPENDING"], self.secrets.stages[self.token])
+                    self.assertEqual([], self.calls_for("DELETE"))
+
+    def test_keyless_project_requires_bootstrap_label(self):
+        self.keyless_project()
+        self.secrets.stages["current"] = ["AWSCURRENT"]
+        with self.assertRaisesRegex(ValueError, "bootstrap"):
+            self.rotate("createSecret")
+        self.assertEqual([], self.calls_for("POST"))
 
     def test_migrated_active_admin_key_rotates_without_bootstrap_label(self):
         self.secrets.values["current"] = self.credential(
