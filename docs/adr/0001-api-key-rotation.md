@@ -1,8 +1,8 @@
 # ADR 0001: API-key rotation ownership and secret-version contract
 
-- **Status:** Accepted
+- **Status:** Accepted for OpenRouter; OpenAI path superseded by [ADR 0002](0002-openai-management-key-rotation.md)
 - **Date:** 2026-11-10
-- **Scope:** OpenAI and OpenRouter API-key rotation in this module; the detailed `TFCONFIG` protocol applies only to OpenRouter.
+- **Scope:** Shared API-key ownership and OpenRouter rotation. ADR 0002 owns the current OpenAI contract.
 
 ## Context
 
@@ -17,9 +17,9 @@ The module originally rotated database credentials. API-key rotation adds a seco
 3. Provider key IDs are durable secret data: OpenAI stores the returned key ID; OpenRouter stores the returned `hash` as `api_key_id`. AWS `ClientRequestToken` is a *secret VersionId*, not a provider key ID. The Lambda must use `api_key_id` when looking up or retiring a provider key.
 4. No Terraform module change is part of the final OpenRouter Lambda-only redesign. Terraform-owned stages `TFCONFIG` and `TFBOOTSTRAP` are never modified by the Lambda.
 
-### OpenAI path
+### OpenAI path — superseded by ADR 0002
 
-5. OpenAI rotation uses the existing workload secret's `project_id`, `service_account_id`, `name`, and `scopes`, with the configured project/service-account binding checked against Lambda environment variables. Replacement keys copy name and scopes, **not expiration**. The returned plaintext and ID are written under the rotation token; the prior key is retired only after promotion. OpenAI does not use the OpenRouter `TFCONFIG` protocol.
+5. **Historical, no longer applicable:** OpenAI rotation used the existing workload secret's project, service account, name, and scopes without TFCONFIG. [ADR 0002](0002-openai-management-key-rotation.md) replaces this with versioned TFCONFIG, an organization-bound independent management key, and a six-field credential. Do not use this paragraph to configure new or migrated OpenAI targets.
 
 ### OpenRouter secret contract
 

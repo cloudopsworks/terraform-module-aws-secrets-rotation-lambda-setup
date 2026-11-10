@@ -30,10 +30,6 @@ locals {
     for key, value in try(var.settings.openrouter, {}) : key => value
     if key == "expires_at"
   }
-  openai_key_options = {
-    for key, value in try(var.settings.openai, {}) : key => value
-    if key == "expires_in_seconds"
-  }
   variables = merge(
     { for item in try(var.settings.environment.variables, []) : item.name => item.value },
     { SECRETS_MANAGER_ENDPOINT = "https://secretsmanager.${data.aws_region.current.region}.amazonaws.com" },
@@ -42,9 +38,8 @@ locals {
       API_PROVIDER          = var.settings.type
       MANAGEMENT_SECRET_ARN = local.management_secret_arn
       }, var.settings.type == "openai" ? {
-      OPENAI_PROJECT_ID         = try(var.settings.openai.project_id, "")
-      OPENAI_SERVICE_ACCOUNT_ID = try(var.settings.openai.service_account_id, "")
-      OPENAI_KEY_OPTIONS_JSON   = jsonencode(local.openai_key_options)
+      OPENAI_ORGANIZATION_ID    = try(var.settings.openai.organization_id, "")
+      ENROLLED_SECRET_ARNS_JSON = jsonencode(var.settings.allowed_secrets)
       } : {
       OPENROUTER_KEY_OPTIONS_JSON = jsonencode(local.openrouter_key_options)
     }) : {}
@@ -123,17 +118,8 @@ resource "aws_lambda_function" "this" {
       error_message = "API key rotation supports only the single-user strategy; set settings.multi_user to false."
     }
     precondition {
-      condition = var.settings.type != "openai" || (
-        try(length(trimspace(var.settings.openai.project_id)) > 0, false) &&
-        try(length(trimspace(var.settings.openai.service_account_id)) > 0, false)
-      )
-      error_message = "OpenAI rotation requires settings.openai.project_id and settings.openai.service_account_id."
-    }
-    precondition {
-      condition = var.settings.type != "openai" || try(var.settings.openai.expires_in_seconds, null) == null || (
-        try(var.settings.openai.expires_in_seconds >= 1 && var.settings.openai.expires_in_seconds <= 31536000, false)
-      )
-      error_message = "settings.openai.expires_in_seconds must be between 1 and 31536000, or null."
+      condition     = var.settings.type != "openai" || try(length(trimspace(var.settings.openai.organization_id)) > 0, false)
+      error_message = "OpenAI rotation requires settings.openai.organization_id."
     }
     precondition {
       condition     = !local.api_key_rotation || length(try(var.settings.allowed_secrets, [])) > 0

@@ -75,7 +75,7 @@ run "management_secret_by_arn_with_customer_kms" {
     settings = {
       type               = "openai"
       management_api_key = { secret_arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:app/management-AbCdEf" }
-      openai             = { project_id = "proj_123", service_account_id = "svc_123" }
+      openai             = { organization_id = "org_123" }
       allowed_secrets    = ["arn:aws:secretsmanager:us-east-1:111122223333:secret:app/workload-AbCdEf"]
     }
   }
@@ -96,6 +96,28 @@ run "management_secret_by_arn_with_customer_kms" {
     condition     = length(aws_iam_role_policy.management_api_key_kms) == 1
     error_message = "Customer-managed encryption must grant decrypt to the Lambda."
   }
+  assert {
+    condition     = local.variables.OPENAI_ORGANIZATION_ID == "org_123"
+    error_message = "OpenAI Lambda must receive its intended organization."
+  }
+  assert {
+    condition     = jsondecode(local.variables.ENROLLED_SECRET_ARNS_JSON) == var.settings.allowed_secrets
+    error_message = "OpenAI Lambda must receive the exact enrolled target ARNs."
+  }
+}
+
+run "reject_openai_without_organization" {
+  command = plan
+
+  variables {
+    settings = {
+      type               = "openai"
+      management_api_key = { secret_arn = "app/management" }
+      allowed_secrets    = ["arn:aws:secretsmanager:us-east-1:111122223333:secret:app/workload-AbCdEf"]
+    }
+  }
+
+  expect_failures = [aws_lambda_function.this]
 }
 
 run "reject_manual_management_kms_override" {
