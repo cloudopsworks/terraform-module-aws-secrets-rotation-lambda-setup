@@ -765,6 +765,11 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
     def pending(self):
         return self.secrets.values["token-123456789"]
 
+    def intent_snapshot(self):
+        version = rotation.openrouter_rotation.intent_version(
+            self.secrets.arn, self.event["ClientRequestToken"])
+        return self.secrets.values[version]["snapshot"]
+
     def create_unresolved_orphan(self, *, abandon=True):
         self.secrets.fail_pending_put = True
         with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
@@ -791,6 +796,7 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
         self.assertEqual(self.pending()["api_key_id"], "new-id")
         self.assertEqual(self.pending()["name"], "resolved-name")
         self.assertIsNone(self.pending()["workspace_id"])
+        self.assertEqual(set(self.pending()), {"api_key", "api_key_id", "name", "workspace_id"})
         self.assertEqual(self.secrets.stages["token-123456789"], ["AWSCURRENT"])
         self.assertIn("TFBOOTSTRAP", self.secrets.stages["current"])
         self.assertEqual(self.secrets.stages["config-v1"], ["TFCONFIG"])
@@ -800,6 +806,7 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
 
     def test_normal_rotation_uses_config_not_old_key_or_environment(self):
         self.rotate("createSecret")
+        self.assertEqual(set(self.pending()), {"api_key", "api_key_id", "name", "workspace_id"})
         posts = [call for call in self.calls if call[0] == "POST"]
         self.assertEqual(len(posts), 1)
         self.assertEqual(posts[0][3], {
@@ -807,7 +814,7 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
             "expires_at": "2026-11-12T14:24:00Z",
         })
         self.assertEqual(self.pending()["name"], "resolved-name")
-        snapshot = self.pending()["_rotation"]
+        snapshot = self.intent_snapshot()
         self.assertEqual(snapshot["config_version_id"], "config-v1")
         self.assertEqual(snapshot["config"], self.config)
         self.assertEqual(snapshot["effective_expires_at"], "2026-11-12T14:24:00Z")
@@ -822,33 +829,33 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
     def test_default_hourly_rate_expiry_includes_one_hour_window_and_guard(self):
         self.secrets.rotation_rules = {"ScheduleExpression": "rate(6 hours)"}
         self.rotate("createSecret")
-        self.assertEqual(self.pending()["_rotation"]["effective_expires_at"],
+        self.assertEqual(self.intent_snapshot()["effective_expires_at"],
                          "2026-11-10T21:00:00Z")
-        self.assertEqual(self.pending()["_rotation"]["expiry_safety_seconds"], 10800)
+        self.assertEqual(self.intent_snapshot()["expiry_safety_seconds"], 10800)
         post = next(call for call in self.calls if call[0] == "POST")
         self.assertEqual(post[3]["expires_at"], "2026-11-10T21:00:00Z")
 
     def test_default_daily_window_extends_to_end_of_day(self):
         self.rotate("createSecret")
-        self.assertEqual(self.pending()["_rotation"]["effective_expires_at"],
+        self.assertEqual(self.intent_snapshot()["effective_expires_at"],
                          "2026-11-12T14:24:00Z")
 
     def test_explicit_rotation_duration_is_fully_added(self):
         self.secrets.rotation_rules = {"ScheduleExpression": "rate(1 day)", "Duration": "4h"}
         self.rotate("createSecret")
-        self.assertEqual(self.pending()["_rotation"]["effective_expires_at"],
+        self.assertEqual(self.intent_snapshot()["effective_expires_at"],
                          "2026-11-11T18:24:00Z")
 
     def test_long_interval_guard_is_capped_at_twenty_four_hours(self):
         self.secrets.rotation_rules = {"ScheduleExpression": "rate(30 days)"}
         self.rotate("createSecret")
-        self.assertEqual(self.pending()["_rotation"]["effective_expires_at"],
+        self.assertEqual(self.intent_snapshot()["effective_expires_at"],
                          "2026-12-12T12:00:00Z")
 
     def test_legacy_automatically_after_days_uses_daily_default_window(self):
         self.secrets.rotation_rules = {"AutomaticallyAfterDays": 7}
         self.rotate("createSecret")
-        self.assertEqual(self.pending()["_rotation"]["effective_expires_at"],
+        self.assertEqual(self.intent_snapshot()["effective_expires_at"],
                          "2026-11-19T04:48:00Z")
 
     def test_explicit_tfconfig_expiration_wins_unchanged(self):
@@ -856,9 +863,9 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
         self.secrets.values["config-v1"] = self.config.copy()
         self.secrets.rotation_rules = {"ScheduleExpression": "cron(0 1 ? * MON *)"}
         self.rotate("createSecret")
-        self.assertEqual(self.pending()["_rotation"]["effective_expires_at"],
+        self.assertEqual(self.intent_snapshot()["effective_expires_at"],
                          "2027-01-01T00:00:00Z")
-        self.assertEqual(self.pending()["_rotation"]["expiry_safety_seconds"], 0)
+        self.assertEqual(self.intent_snapshot()["expiry_safety_seconds"], 0)
         post = next(call for call in self.calls if call[0] == "POST")
         self.assertEqual(post[3]["expires_at"], "2027-01-01T00:00:00Z")
 
@@ -889,13 +896,13 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
 
     def test_effective_expiration_is_pinned_on_retry_after_schedule_change(self):
         self.rotate("createSecret")
-        pinned = self.pending()["_rotation"]["effective_expires_at"]
+        pinned = self.intent_snapshot()["effective_expires_at"]
         self.secrets.rotation_rules = {"ScheduleExpression": "rate(6 hours)", "Duration": "2h"}
         self.secrets.values["config-v2"] = {**self.config, "name": "future-name"}
         self.secrets.stages["config-v1"].remove("TFCONFIG")
         self.secrets.stages["config-v2"] = ["TFCONFIG"]
         self.rotate("createSecret")
-        self.assertEqual(self.pending()["_rotation"]["effective_expires_at"], pinned)
+        self.assertEqual(self.intent_snapshot()["effective_expires_at"], pinned)
         self.assertEqual(sum(call[0] == "POST" for call in self.calls), 1)
 
     def test_delayed_finish_does_not_promote_near_expired_derived_key(self):
@@ -926,8 +933,17 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
         self.assertEqual(self.secrets.stages["current"], ["AWSPREVIOUS"])
         self.assertEqual(self.secrets.stages["token-123456789"], ["AWSCURRENT"])
         self.assertEqual(self.secrets.stages["config-v1"], ["TFCONFIG"])
+        self.assertEqual(set(self.pending()), {"api_key", "api_key_id", "name", "workspace_id"})
+        self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
         self.assertIn(("DELETE", "https://openrouter.ai/api/v1/keys/old-id",
                        "management-credential", None), self.calls)
+
+    def test_legacy_active_metadata_is_not_copied_to_new_credential(self):
+        self.secrets.values["current"]["_rotation"] = {"legacy": "metadata"}
+        for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
+            self.rotate(step)
+        self.assertEqual(set(self.pending()), {"api_key", "api_key_id", "name", "workspace_id"})
+        self.assertEqual(self.secrets.stages["token-123456789"], ["AWSCURRENT"])
 
     def test_predecessor_is_retired_only_after_current_promotion(self):
         def retire(management, key_id):
@@ -942,15 +958,112 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
         self.rotate("createSecret")
         self.rotate("createSecret")
         self.assertEqual(sum(call[0] == "POST" for call in self.calls), 1)
+        self.assertTrue(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+
+    def test_intent_survives_until_retirement_not_in_current_payload(self):
+        for step in ("createSecret", "setSecret", "testSecret"):
+            self.rotate(step)
+            self.assertTrue(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+            self.assertEqual(set(self.pending()), {"api_key", "api_key_id", "name", "workspace_id"})
+        self.rotate("finishSecret")
         self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+        self.assertEqual(self.secrets.stages["token-123456789"], ["AWSCURRENT"])
+
+    def test_retirement_failure_keeps_intent_and_retries_same_predecessor(self):
+        self.rotate("createSecret")
+        self.rotate("setSecret")
+        self.rotate("testSecret")
+        with patch.object(openrouter_keys, "delete_key", side_effect=RuntimeError("temporary")):
+            with self.assertRaises(RuntimeError):
+                self.rotate("finishSecret")
+        self.assertTrue(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+        self.assertIn("AWSCURRENT", self.secrets.stages["token-123456789"])
+        self.rotate("finishSecret")
+        self.assertIn(("DELETE", "https://openrouter.ai/api/v1/keys/old-id",
+                       "management-credential", None), self.calls)
+        self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+
+    def test_intent_removal_after_commit_failure_is_safe_to_retry(self):
+        for step in ("createSecret", "setSecret", "testSecret"):
+            self.rotate(step)
+        original_update = self.secrets.update_secret_version_stage
+        def fail_after_intent_removal(**kwargs):
+            original_update(**kwargs)
+            if kwargs.get("VersionStage") == "ROTATIONINTENT":
+                raise RuntimeError("AWS response lost after intent removal")
+        with patch.object(self.secrets, "update_secret_version_stage", side_effect=fail_after_intent_removal):
+            with self.assertRaises(RuntimeError):
+                self.rotate("finishSecret")
+        delete_count = sum(call[0] == "DELETE" for call in self.calls)
+        self.rotate("finishSecret")
+        self.assertEqual(sum(call[0] == "DELETE" for call in self.calls), delete_count)
+        self.assertEqual(set(self.pending()), {"api_key", "api_key_id", "name", "workspace_id"})
+
+    def test_intent_removal_before_commit_failure_retries_cleanup(self):
+        for step in ("createSecret", "setSecret", "testSecret"):
+            self.rotate(step)
+        original_update = self.secrets.update_secret_version_stage
+        def fail_before_intent_removal(**kwargs):
+            if kwargs.get("VersionStage") == "ROTATIONINTENT":
+                raise RuntimeError("AWS removal unavailable")
+            return original_update(**kwargs)
+        with patch.object(self.secrets, "update_secret_version_stage", side_effect=fail_before_intent_removal):
+            with self.assertRaises(RuntimeError):
+                self.rotate("finishSecret")
+        self.assertTrue(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+        self.rotate("finishSecret")
+        self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+        self.assertEqual(set(self.pending()), {"api_key", "api_key_id", "name", "workspace_id"})
+
+    def test_new_token_cannot_replace_unfinished_intent(self):
+        self.rotate("createSecret")
+        self.event["ClientRequestToken"] = "next-token"
+        self.secrets.stages["next-token"] = ["AWSPENDING"]
+        with patch.object(openrouter_keys, "create_key") as create:
+            with self.assertRaises(RuntimeError):
+                self.rotate("createSecret")
+        create.assert_not_called()
+        self.assertIn("ROTATIONINTENT", self.secrets.stages[
+            rotation.openrouter_rotation.intent_version(self.secrets.arn, "token-123456789")])
+
+    def test_legacy_pending_without_intent_fails_closed(self):
+        self.rotate("createSecret")
+        intent = self.intent_snapshot()["intent_version_id"]
+        self.secrets.stages[intent].remove("ROTATIONINTENT")
+        self.pending()["_rotation"] = self.intent_snapshot().copy()
+        for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
+            with self.subTest(step=step), self.assertRaises(Exception):
+                self.rotate(step)
+        self.assertEqual(self.secrets.stages["current"], ["AWSCURRENT"])
+        self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+
+    def test_legacy_current_without_intent_does_not_claim_retirement(self):
+        self.secrets.values["current"]["_rotation"] = {"legacy": "possibly unfinished"}
+        self.event["ClientRequestToken"] = "current"
+        with self.assertRaises(ValueError):
+            self.rotate("finishSecret")
+        self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+
+    def test_old_finish_retry_does_not_clear_newer_rotation_intent(self):
+        for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
+            self.rotate(step)
+        self.event["ClientRequestToken"] = "next-token"
+        self.secrets.stages["next-token"] = ["AWSPENDING"]
+        with patch.object(openrouter_keys, "create_key", return_value=("next-workload", "next-id")):
+            self.rotate("createSecret")
+        next_intent = self.intent_snapshot()["intent_version_id"]
+        self.event["ClientRequestToken"] = "token-123456789"
+        self.rotate("finishSecret")
+        self.assertIn("ROTATIONINTENT", self.secrets.stages[next_intent])
 
     def test_unstaged_credential_receipt_does_not_clear_intent(self):
         self.rotate("createSecret")
-        intent = self.pending()["_rotation"]["intent_version_id"]
+        intent = self.intent_snapshot()["intent_version_id"]
         self.secrets.stages[intent] = ["ROTATIONINTENT"]
         self.secrets.stages["token-123456789"] = []
         with self.assertRaises(Exception):
-            rotation.openrouter_rotation.clear_completed_intent(self.secrets, self.secrets.arn)
+            rotation.openrouter_rotation.clear_completed_intent(
+                self.secrets, self.secrets.arn, self.event["ClientRequestToken"])
         self.assertIn("ROTATIONINTENT", self.secrets.stages[intent])
 
     def test_missing_config_fails_before_provider_creation_then_retries(self):
@@ -978,7 +1091,7 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
             rotation.rotate(self.event, self.secrets)
         self.assertEqual(missing, 2)
         self.assertEqual(sleep.call_count, 2)
-        self.assertEqual(self.pending()["_rotation"]["config_version_id"], "config-v1")
+        self.assertEqual(self.intent_snapshot()["config_version_id"], "config-v1")
 
     def test_management_secret_read_failure_does_not_claim_intent(self):
         original_get = self.secrets.get_secret_value
@@ -1002,7 +1115,7 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
         self.secrets.stages["config-v2"] = ["TFCONFIG"]
         for step in ("setSecret", "testSecret", "finishSecret"):
             self.rotate(step)
-        self.assertEqual(self.pending()["_rotation"]["config_version_id"], "config-v1")
+        self.assertEqual(self.intent_snapshot()["config_version_id"], "config-v1")
         self.assertEqual(self.pending()["name"], "resolved-name")
 
     def test_malformed_config_fails_closed(self):
@@ -1257,7 +1370,7 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
 
     def test_finish_rejects_snapshot_predecessor_drift_before_promotion(self):
         self.rotate("createSecret")
-        self.pending()["_rotation"]["previous_api_key_id"] = "different-id"
+        self.intent_snapshot()["previous_api_key_id"] = "different-id"
         with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
             with self.assertRaises(Exception):
                 rotation.rotate({**self.event, "Step": "finishSecret"}, self.secrets)

@@ -40,6 +40,7 @@ SNAPSHOT_FIELDS = frozenset({
     "previous_api_key_id", "intent_version_id", "effective_expires_at",
     "expiry_safety_seconds",
 })
+CREDENTIAL_FIELDS = frozenset({"api_key", "api_key_id", "name", "workspace_id"})
 RATE_PATTERN = re.compile(r"^rate\((\d+) (hour|hours|day|days)\)$")
 DURATION_PATTERN = re.compile(r"^(\d+)h$")
 
@@ -211,10 +212,10 @@ def check_snapshot(snapshot, arn, token):
         raise ValueError("Rotation predecessor identifier is invalid")
 
 
-def check_pending(value, arn, token):
+def check_pending(value, snapshot):
+    if set(value) != CREDENTIAL_FIELDS:
+        raise ValueError("Pending credential must contain only four fields")
     check_credential(value)
-    snapshot = value.get("_rotation")
-    check_snapshot(snapshot, arn, token)
     if value["api_key_id"] == snapshot["previous_api_key_id"]:
         raise ValueError("Pending key identifier matches predecessor")
     if value["name"] != snapshot["config"]["name"]:
@@ -222,7 +223,13 @@ def check_pending(value, arn, token):
     requested_workspace = snapshot["config"]["workspace_id"]
     if requested_workspace is not None and value["workspace_id"] != requested_workspace:
         raise ValueError("Pending workspace differs from pinned TFCONFIG")
-    return snapshot
+
+
+def token_intent(secrets, arn, token):
+    intent = read_intent(secrets, arn)
+    if intent is None or intent["token"] != token:
+        raise ValueError("Rotation intent does not match token")
+    return intent
 
 
 def read_intent(secrets, arn):
@@ -243,21 +250,13 @@ def read_intent(secrets, arn):
     return intent
 
 
-def clear_completed_intent(secrets, arn):
-    intent = read_intent(secrets, arn)
-    if intent is None:
-        return
-    try:
-        credential, _ = read_json(secrets, arn, VersionId=intent["token"])
-    except secrets.exceptions.ResourceNotFoundException:
-        LOG.error("openrouter_rotation orphan_reconciliation_required secret_id=%s version_id=%s", arn, intent["token"])
-        raise RuntimeError("Possible orphaned OpenRouter key; reconcile ROTATIONINTENT") from None
-    snapshot = check_pending(credential, arn, intent["token"])
-    if snapshot != intent["snapshot"]:
-        raise RuntimeError("Rotation intent does not match saved credential")
+def clear_completed_intent(secrets, arn, token):
+    intent = token_intent(secrets, arn, token)
     stages = secrets.describe_secret(SecretId=arn)["VersionIdsToStages"]
-    if not ({"AWSPENDING", "AWSCURRENT"} & set(stages.get(intent["token"], ()))):
-        raise RuntimeError("Saved credential has no active rotation stage")
+    if "AWSCURRENT" not in stages.get(token, ()) or "AWSPENDING" in stages.get(token, ()):
+        raise RuntimeError("Rotation credential has not finished")
+    credential, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSCURRENT")
+    check_pending(credential, intent["snapshot"])
     secrets.update_secret_version_stage(
         SecretId=arn, VersionStage=INTENT_STAGE,
         RemoveFromVersionId=intent["intent_version_id"],
@@ -299,8 +298,6 @@ def rotate(event, secrets):
         return
     metadata = rotation_metadata(secrets, arn, token)
     if "AWSCURRENT" in metadata["VersionIdsToStages"].get(token, ()) and step != "finishSecret":
-        if step == "createSecret":
-            clear_completed_intent(secrets, metadata["ARN"])
         return
     if step == "createSecret":
         create_secret(secrets, metadata, token)
@@ -372,17 +369,21 @@ def reconcile_orphan(secrets, metadata, event):
 
 def create_secret(secrets, metadata, token):
     arn = metadata["ARN"]
-    # Reuse an already persisted key. Clearing a matching intent after a
-    # previous timeout is safe; issuing another provider key is not.
+    # Reuse a durable pending credential, but retain the intent snapshot
+    # through predecessor retirement and pending-label cleanup.
     try:
         pending, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
     except secrets.exceptions.ResourceNotFoundException:
         pending = None
     if pending is not None:
-        check_pending(pending, arn, token)
-        clear_completed_intent(secrets, arn)
+        check_pending(pending, token_intent(secrets, arn, token)["snapshot"])
         return
-    clear_completed_intent(secrets, arn)
+    intent = read_intent(secrets, arn)
+    if intent is not None:
+        if intent["token"] != token:
+            raise RuntimeError("Another OpenRouter rotation is unfinished")
+        LOG.error("openrouter_rotation orphan_reconciliation_required secret_id=%s version_id=%s", arn, token)
+        raise RuntimeError("Possible orphaned OpenRouter key; reconcile ROTATIONINTENT")
     config, config_version_id = read_config(secrets, arn)
     expires_at, expiry_safety_seconds = effective_expiry(config, metadata)
     current, previous_version_id = read_json(secrets, arn, VersionStage="AWSCURRENT")
@@ -426,7 +427,7 @@ def create_secret(secrets, metadata, token):
         raise ValueError("OpenRouter did not confirm configured workspace")
     pending = {
         "api_key": key, "api_key_id": key_id, "name": config["name"],
-        "workspace_id": workspace, "_rotation": snapshot,
+        "workspace_id": workspace,
     }
     try:
         secrets.put_secret_value(
@@ -445,13 +446,14 @@ def create_secret(secrets, metadata, token):
     saved, _ = read_json(secrets, arn, VersionId=token)
     if saved != pending:
         raise RuntimeError("Pending version differs; reconcile ROTATIONINTENT")
-    clear_completed_intent(secrets, arn)
+    check_pending(saved, token_intent(secrets, arn, token)["snapshot"])
     LOG.info("openrouter_rotation pending_persisted secret_id=%s version_id=%s key_id=%s", arn, token, key_id)
 
 
 def set_secret(secrets, arn, token):
     pending, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
-    snapshot = check_pending(pending, arn, token)
+    snapshot = token_intent(secrets, arn, token)["snapshot"]
+    check_pending(pending, snapshot)
     disabled = snapshot["config"]["disabled"]
     if disabled is not None:
         admin_key = management_key(secrets)
@@ -463,7 +465,8 @@ def set_secret(secrets, arn, token):
 
 def test_secret(secrets, arn, token):
     pending, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
-    snapshot = check_pending(pending, arn, token)
+    snapshot = token_intent(secrets, arn, token)["snapshot"]
+    check_pending(pending, snapshot)
     if (snapshot["config"]["expires_at"] is None and
             parse_expiry(snapshot["effective_expires_at"]) <=
             utcnow() + timedelta(seconds=snapshot["expiry_safety_seconds"])):
@@ -482,9 +485,21 @@ def test_secret(secrets, arn, token):
 def finish_secret(secrets, metadata, token):
     arn = metadata["ARN"]
     already_current = "AWSCURRENT" in metadata["VersionIdsToStages"].get(token, ())
+    intent = read_intent(secrets, arn)
+    if already_current and (intent is None or intent["token"] != token):
+        if "AWSPENDING" in metadata["VersionIdsToStages"].get(token, ()):
+            raise ValueError("Pending label remains without rotation intent")
+        current, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSCURRENT")
+        if set(current) != CREDENTIAL_FIELDS:
+            raise ValueError("Completed credential has unexpected fields")
+        check_credential(current)
+        return
+    if intent is None or intent["token"] != token:
+        raise ValueError("Rotation intent does not match token")
+    snapshot = intent["snapshot"]
     stage = "AWSCURRENT" if already_current else "AWSPENDING"
     pending, _ = read_json(secrets, arn, VersionId=token, VersionStage=stage)
-    snapshot = check_pending(pending, arn, token)
+    check_pending(pending, snapshot)
     previous_id = snapshot["previous_version_id"]
     previous, _ = read_json(secrets, arn, VersionId=previous_id)
     previous_stages = metadata["VersionIdsToStages"].get(previous_id, ())
@@ -524,4 +539,4 @@ def finish_secret(secrets, metadata, token):
         secrets.update_secret_version_stage(
             SecretId=arn, VersionStage="AWSPENDING", RemoveFromVersionId=token,
         )
-    clear_completed_intent(secrets, arn)
+    clear_completed_intent(secrets, arn, token)
