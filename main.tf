@@ -38,8 +38,7 @@ locals {
       API_PROVIDER          = var.settings.type
       MANAGEMENT_SECRET_ARN = local.management_secret_arn
       }, var.settings.type == "openai" ? {
-      OPENAI_ORGANIZATION_ID    = try(var.settings.openai.organization_id, "")
-      ENROLLED_SECRET_ARNS_JSON = jsonencode(var.settings.allowed_secrets)
+      OPENAI_ORGANIZATION_ID = try(var.settings.openai.organization_id, "")
       } : {
       OPENROUTER_KEY_OPTIONS_JSON = jsonencode(local.openrouter_key_options)
     }) : {}

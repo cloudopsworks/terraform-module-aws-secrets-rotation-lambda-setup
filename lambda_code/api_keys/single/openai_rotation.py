@@ -55,19 +55,9 @@ def intent_version(arn, token):
     return hashlib.sha256(f"openai-intent:{arn}:{token}".encode("utf-8")).hexdigest()
 
 
-def enrolled_arns():
-    values = json.loads(os.environ["ENROLLED_SECRET_ARNS_JSON"])
-    if (not isinstance(values, list) or not values or
-            any(not isinstance(value, str) or not value.startswith("arn:") or
-                ":secretsmanager:" not in value or "*" in value or "?" in value
-                for value in values) or len(values) != len(set(values))):
-        raise ValueError("Enrolled secret ARNs must be an exact nonempty allowlist")
-    return frozenset(values)
-
-
 def secret_metadata(secrets, arn):
-    if arn not in enrolled_arns() or arn == os.environ["MANAGEMENT_SECRET_ARN"]:
-        raise ValueError("Secret is not enrolled for OpenAI rotation")
+    if arn == os.environ["MANAGEMENT_SECRET_ARN"]:
+        raise ValueError("Management secret cannot be a rotation target")
     metadata = secrets.describe_secret(SecretId=arn)
     if metadata.get("ARN") != arn or metadata.get("DeletedDate") is not None:
         raise ValueError("Secret identity is invalid or scheduled for deletion")

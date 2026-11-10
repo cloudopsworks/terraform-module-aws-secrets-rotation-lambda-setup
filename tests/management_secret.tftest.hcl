@@ -101,8 +101,8 @@ run "management_secret_by_arn_with_customer_kms" {
     error_message = "OpenAI Lambda must receive its intended organization."
   }
   assert {
-    condition     = jsondecode(local.variables.ENROLLED_SECRET_ARNS_JSON) == var.settings.allowed_secrets
-    error_message = "OpenAI Lambda must receive the exact enrolled target ARNs."
+    condition     = !contains(keys(local.variables), "ENROLLED_SECRET_ARNS_JSON")
+    error_message = "OpenAI enrollment belongs to IAM, not a second Lambda allowlist."
   }
 }
 

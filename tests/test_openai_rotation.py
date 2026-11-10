@@ -31,7 +31,6 @@ class OpenAIRotationTests(unittest.TestCase):
         self.environment = patch.dict(os.environ, {
             "API_PROVIDER": "openai", "MANAGEMENT_SECRET_ARN": "management-secret",
             "OPENAI_ORGANIZATION_ID": "org_123",
-            "ENROLLED_SECRET_ARNS_JSON": json.dumps([self.arn]),
         }, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -343,10 +342,9 @@ class OpenAIRotationTests(unittest.TestCase):
             self.rotate("createSecret")
         self.assertEqual([], self.calls_for("POST"))
 
-    def test_allowlist_drift_rejects_target_before_provider_access(self):
-        os.environ["ENROLLED_SECRET_ARNS_JSON"] = json.dumps([
-            "arn:aws:secretsmanager:us-east-1:123456789012:secret:other-ABC123"])
-        with self.assertRaisesRegex(ValueError, "not enrolled"):
+    def test_management_secret_cannot_be_rotation_target(self):
+        os.environ["MANAGEMENT_SECRET_ARN"] = self.arn
+        with self.assertRaisesRegex(ValueError, "Management secret cannot"):
             self.rotate("createSecret")
         self.assertEqual([], self.calls)
 
