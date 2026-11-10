@@ -1,9 +1,4 @@
-"""Rotate provider API keys with AWS Secrets Manager.
-
-The management credential is stored in a separate secret. The rotated secret
-contains ``api_key`` and ``api_key_id`` (OpenRouter's key hash), plus a bounded
-link to the predecessor version. Non-expiration key parameters are retained.
-"""
+"""Dispatch provider-specific Secrets Manager API-key rotation."""
 
 import json
 import logging
@@ -12,6 +7,7 @@ import os
 import boto3
 import openai_keys
 import openrouter_keys
+import openrouter_rotation
 
 
 LOG = logging.getLogger(__name__)
@@ -31,7 +27,7 @@ def lambda_handler(event, context):
         provider = os.environ.get("API_PROVIDER", "unknown")
         provider = provider if provider in ("openai", "openrouter") else "unknown"
         step = event.get("Step") if isinstance(event, dict) else None
-        step = step if step in ("createSecret", "setSecret", "testSecret", "finishSecret") else "unknown"
+        step = step if step in ("createSecret", "setSecret", "testSecret", "finishSecret", "reconcileOrphan") else "unknown"
         LOG.error("API key rotation failed: provider=%s step=%s error_type=%s", provider, step, type(exc).__name__)
         raise RuntimeError("API key rotation failed") from None
 
@@ -43,6 +39,9 @@ def rotate(event, secrets):
     provider = os.environ["API_PROVIDER"]
     if provider not in PROVIDERS:
         raise ValueError("Unsupported API provider")
+    if provider == "openrouter":
+        openrouter_rotation.rotate(event, secrets)
+        return
     if step not in ("createSecret", "setSecret", "testSecret", "finishSecret"):
         raise ValueError("Unsupported rotation step")
 
@@ -58,10 +57,11 @@ def rotate(event, secrets):
     if step == "createSecret":
         create_secret(secrets, arn, token, provider)
     elif step == "setSecret":
-        get_secret(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
+        pending = get_secret(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
+        check_pending_secret(pending, provider, check_environment=True)
     elif step == "testSecret":
         pending = get_secret(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
-        check_secret(pending, provider, check_environment=True)
+        check_pending_secret(pending, provider, check_environment=True)
         PROVIDERS[provider].validate_key(pending["api_key"])
     else:
         finish_secret(secrets, arn, token, provider, metadata)
@@ -79,24 +79,29 @@ def get_secret_version(secrets, arn, **version):
     return secret, value["VersionId"]
 
 
-def check_secret(secret, provider, check_environment=False, require_options=True):
-    if not secret.get("api_key") or not secret.get("api_key_id") or "key_id" in secret:
+def check_secret(secret, provider, check_environment=False):
+    if (not isinstance(secret.get("api_key"), str) or not secret["api_key"] or
+            not isinstance(secret.get("api_key_id"), str) or not secret["api_key_id"] or
+            "key_id" in secret):
         raise ValueError("Key secret is incomplete")
-    if provider == "openai":
-        project = secret.get("project_id")
-        account = secret.get("service_account_id")
-        if not isinstance(project, str) or not project or not isinstance(account, str) or not account:
-            raise ValueError("OpenAI key secret is missing its project or service account")
-        if check_environment and (project != os.environ["OPENAI_PROJECT_ID"] or
-                                  account != os.environ["OPENAI_SERVICE_ACCOUNT_ID"]):
-            raise ValueError("OpenAI key secret binding differs from configuration")
-        scopes = secret.get("scopes")
-        if not isinstance(scopes, list) or any(not isinstance(scope, str) or not scope for scope in scopes):
-            raise ValueError("OpenAI key secret must record its scopes")
-        if not isinstance(secret.get("name"), str) or not secret["name"]:
-            raise ValueError("OpenAI key secret must record its name")
-    elif require_options:
-        openrouter_keys.key_options(secret)
+    if provider != "openai":
+        raise ValueError("Unsupported provider in OpenAI rotation path")
+    project = secret.get("project_id")
+    account = secret.get("service_account_id")
+    if not isinstance(project, str) or not project or not isinstance(account, str) or not account:
+        raise ValueError("OpenAI key secret is missing its project or service account")
+    if check_environment and (project != os.environ["OPENAI_PROJECT_ID"] or
+                              account != os.environ["OPENAI_SERVICE_ACCOUNT_ID"]):
+        raise ValueError("OpenAI key secret binding differs from configuration")
+    scopes = secret.get("scopes")
+    if not isinstance(scopes, list) or any(not isinstance(scope, str) or not scope for scope in scopes):
+        raise ValueError("OpenAI key secret must record its scopes")
+    if not isinstance(secret.get("name"), str) or not secret["name"]:
+        raise ValueError("OpenAI key secret must record its name")
+
+
+def check_pending_secret(secret, provider, check_environment=False):
+    check_secret(secret, provider, check_environment=check_environment)
 
 
 def audit(action, provider, arn, version_id, key_id, secret):
@@ -119,10 +124,9 @@ def audit(action, provider, arn, version_id, key_id, secret):
 
 
 def revoke_key(provider, management, secret):
-    if provider == "openai":
-        openai_keys.delete_key(management, secret["api_key_id"], secret["project_id"])
-    else:
-        openrouter_keys.delete_key(management, secret["api_key_id"])
+    if provider != "openai":
+        raise ValueError("Unsupported provider in OpenAI rotation path")
+    openai_keys.delete_key(management, secret["api_key_id"], secret["project_id"])
 
 
 def management_key(secrets):
@@ -137,44 +141,23 @@ def management_key(secrets):
 
 
 def create_secret(secrets, arn, token, provider):
-    current, current_version = get_secret_version(secrets, arn, VersionStage="AWSCURRENT")
-    check_secret(current, provider, check_environment=True, require_options=False)
+    current = get_secret(secrets, arn, VersionStage="AWSCURRENT")
+    check_secret(current, provider, check_environment=True)
     try:
         pending = get_secret(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
-        check_secret(pending, provider, check_environment=True)
+        check_pending_secret(pending, provider, check_environment=True)
         return
     except secrets.exceptions.ResourceNotFoundException:
         pass
     admin_key = management_key(secrets)
-    if provider == "openrouter":
-        parameters = openrouter_keys.key_options(current, admin_key)
-        key, key_id, requested_workspace, returned_workspace = openrouter_keys.create_key(
-            admin_key, token, current.get("workspace_id"), parameters)
-    else:
-        parameters = openai_keys.key_options(current)
-        key, key_id = openai_keys.create_key(admin_key, token, parameters)
-    pending = {
-        **current, "api_key": key, "api_key_id": key_id,
-        "rotation": {"previous_version_id": current_version, "previous_api_key_id": current["api_key_id"]},
-    }
+    parameters = openai_keys.key_options(current)
+    key, key_id = openai_keys.create_key(admin_key, token, parameters)
+    pending = {**current, "api_key": key, "api_key_id": key_id}
     pending.pop("provider", None)
+    pending.pop("rotation", None)
     pending.pop("expires_at", None)
     pending.pop("expires_in_seconds", None)
     pending.update(parameters)
-    workspace_error = None
-    if provider == "openrouter":
-        if returned_workspace is not None and (not isinstance(returned_workspace, str) or not returned_workspace):
-            workspace_error = "workspace_invalid"
-        elif returned_workspace != requested_workspace:
-            workspace_error = "workspace_mismatch"
-    if workspace_error:
-        audit("issued", provider, arn, token, key_id, pending)
-        audit(workspace_error, provider, arn, token, key_id, pending)
-        revoke_key(provider, admin_key, pending)
-        audit("revoked_unreferenced", provider, arn, token, key_id, pending)
-        raise ValueError("OpenRouter did not confirm the requested key workspace")
-    if provider == "openrouter" and returned_workspace is not None:
-        pending["workspace_id"] = returned_workspace
     audit("issued", provider, arn, token, key_id, pending)
     try:
         secrets.put_secret_value(
@@ -206,64 +189,61 @@ def create_secret(secrets, arn, token, provider):
     audit("pending_persisted", provider, arn, token, key_id, pending)
 
 
-def finish_secret(secrets, arn, token, provider, metadata):
-    pending = get_secret(secrets, arn, VersionId=token)
-    check_secret(pending, provider)
-    link = pending.get("rotation")
-    if not isinstance(link, dict):
-        raise ValueError("Pending key secret is missing its predecessor")
-    old_token = link.get("previous_version_id")
-    old_id = link.get("previous_api_key_id")
-    if not isinstance(old_token, str) or not old_token or not isinstance(old_id, str) or not old_id:
-        raise ValueError("Pending key secret is missing its predecessor")
-    if old_token == token:
-        raise ValueError("Pending key secret links to itself")
-    previous = get_secret(secrets, arn, VersionId=old_token)
-    check_secret(previous, provider, require_options=False)
-    if previous["api_key_id"] != old_id:
-        raise ValueError("Previous key identifier differs from pending link")
+def check_predecessor(previous, pending, provider):
+    check_secret(previous, provider)
     if previous["api_key_id"] == pending["api_key_id"]:
         raise ValueError("Pending key identifier matches its predecessor")
-    if provider == "openai" and (previous["project_id"] != pending["project_id"] or
-                                 previous["service_account_id"] != pending["service_account_id"]):
+    if (previous["project_id"] != pending["project_id"] or
+            previous["service_account_id"] != pending["service_account_id"] or
+            previous["scopes"] != pending["scopes"]):
         raise ValueError("OpenAI previous key binding differs from pending")
-    if provider == "openai" and previous["scopes"] != pending["scopes"]:
-        raise ValueError("OpenAI previous key scopes differ from pending")
-    if provider == "openrouter" and previous.get("workspace_id") is not None and \
-            previous["workspace_id"] != pending.get("workspace_id"):
-        raise ValueError("OpenRouter previous key workspace differs from pending")
-    if provider == "openrouter" and any(
-            key not in pending or previous[key] != pending[key]
-            for key in openrouter_keys.KEY_OPTIONS if key in previous):
-        raise ValueError("OpenRouter previous key options differ from pending")
-    versions = metadata["VersionIdsToStages"]
-    if "AWSCURRENT" not in versions.get(token, []):
-        current, current_version = get_secret_version(secrets, arn, VersionStage="AWSCURRENT")
-        check_secret(current, provider, check_environment=True, require_options=False)
-        check_secret(pending, provider, check_environment=True)
-        if current_version != old_token or current["api_key_id"] != old_id:
-            raise ValueError("Current key differs from pending predecessor")
-        if provider == "openai" and (current["project_id"] != pending["project_id"] or
-                                     current["service_account_id"] != pending["service_account_id"]):
-            raise ValueError("OpenAI current key binding differs from pending")
-        if provider == "openrouter" and current.get("workspace_id") is not None and \
-                current["workspace_id"] != pending.get("workspace_id"):
-            raise ValueError("OpenRouter current key workspace differs from pending")
+
+
+def finish_secret(secrets, arn, token, provider, metadata):
+    already_current = "AWSCURRENT" in metadata["VersionIdsToStages"].get(token, [])
+    pending = get_secret(
+        secrets, arn, VersionId=token,
+        VersionStage="AWSCURRENT" if already_current else "AWSPENDING")
+    check_pending_secret(pending, provider, check_environment=not already_current)
+    previous_version_before_promotion = None
+    if not already_current:
+        previous, previous_version_before_promotion = get_secret_version(
+            secrets, arn, VersionStage="AWSCURRENT")
+        check_predecessor(previous, pending, provider)
         secrets.update_secret_version_stage(
             SecretId=arn,
             VersionStage="AWSCURRENT",
             MoveToVersionId=token,
-            RemoveFromVersionId=old_token,
+            RemoveFromVersionId=previous_version_before_promotion,
         )
         audit("promoted", provider, arn, token, pending["api_key_id"], pending)
+
     current, current_version = get_secret_version(secrets, arn, VersionStage="AWSCURRENT")
-    check_secret(current, provider)
+    check_pending_secret(current, provider)
     if current_version != token or current["api_key_id"] != pending["api_key_id"]:
         raise ValueError("Current key differs from promoted pending key")
-    if provider == "openai" and (current["project_id"] != pending["project_id"] or
-                                 current["service_account_id"] != pending["service_account_id"]):
-        raise ValueError("OpenAI current key binding differs from pending")
-    if provider == "openrouter" and current.get("workspace_id") != pending.get("workspace_id"):
-        raise ValueError("OpenRouter current key workspace differs from pending")
-    revoke_key(provider, management_key(secrets), previous)
-    audit("retired", provider, arn, old_token, previous["api_key_id"], previous)
+    previous, previous_version = get_secret_version(secrets, arn, VersionStage="AWSPREVIOUS")
+    if previous_version_before_promotion is not None and previous_version != previous_version_before_promotion:
+        raise ValueError("Previous stage differs from promoted predecessor")
+    check_predecessor(previous, pending, provider)
+    admin_key = management_key(secrets)
+    stages = secrets.describe_secret(SecretId=arn)["VersionIdsToStages"]
+    if ("AWSCURRENT" not in stages.get(token, []) or
+            "AWSPREVIOUS" not in stages.get(previous_version, [])):
+        raise ValueError("Rotation stages changed before old key retirement")
+    revoke_key(provider, admin_key, previous)
+    audit("retired", provider, arn, previous_version, previous["api_key_id"], previous)
+
+    # Keep AWSCURRENT in place. AWS may retain AWSPENDING on the newly
+    # promoted version; remove only that token's pending label after the old
+    # provider key has been retired. A retry may find it already removed.
+    stages = secrets.describe_secret(SecretId=arn)["VersionIdsToStages"]
+    if "AWSCURRENT" not in stages.get(token, []):
+        raise ValueError("Current stage changed before pending cleanup")
+    if "AWSPENDING" in stages.get(token, []):
+        secrets.update_secret_version_stage(
+            SecretId=arn,
+            VersionStage="AWSPENDING",
+            RemoveFromVersionId=token,
+        )
+        audit("pending_cleared", provider, arn, token, pending["api_key_id"], pending)
