@@ -16,13 +16,28 @@ KEY_OPTIONS = (
 )
 
 
-def key_options(current):
-    """Copy the recorded workload-key fields, excluding old expiration."""
+def key_options(current, management_key=None):
+    """Verify the old key hash and fill absent fields from its metadata."""
     if current.get("disabled") is True or current.get("external_user") is not None or current.get("external") is not None:
         raise ValueError("OpenRouter key cannot be reproduced")
-    if any(key not in current for key in KEY_OPTIONS):
-        raise ValueError("OpenRouter key secret must record all key options")
-    options = {key: current[key] for key in KEY_OPTIONS}
+    missing = [key for key in KEY_OPTIONS if key not in current]
+    if management_key is None:
+        if missing:
+            raise ValueError("OpenRouter key secret must record all key options")
+        metadata = {}
+    else:
+        key_id = current.get("api_key_id")
+        if not isinstance(key_id, str) or not key_id:
+            raise ValueError("OpenRouter key hash is missing")
+        result = call_api("GET", f"{BASE_URL}/keys/{parse.quote(key_id, safe='')}", management_key)
+        metadata = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(metadata, dict) or metadata.get("hash") != key_id:
+            raise ValueError("OpenRouter key metadata does not match its hash")
+        if metadata.get("disabled") is True or metadata.get("external_user") is not None:
+            raise ValueError("OpenRouter key cannot be reproduced")
+        if any(key not in metadata for key in KEY_OPTIONS):
+            raise ValueError("OpenRouter key metadata lacks policy options")
+    options = {key: current[key] if key in current else metadata[key] for key in KEY_OPTIONS}
     if not isinstance(options["name"], str) or not options["name"]:
         raise ValueError("OpenRouter key name is invalid")
     if options["limit"] is not None and (isinstance(options["limit"], bool) or

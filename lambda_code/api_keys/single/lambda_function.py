@@ -79,7 +79,7 @@ def get_secret_version(secrets, arn, **version):
     return secret, value["VersionId"]
 
 
-def check_secret(secret, provider, check_environment=False):
+def check_secret(secret, provider, check_environment=False, require_options=True):
     if not secret.get("api_key") or not secret.get("api_key_id") or "key_id" in secret:
         raise ValueError("Key secret is incomplete")
     if provider == "openai":
@@ -95,7 +95,7 @@ def check_secret(secret, provider, check_environment=False):
             raise ValueError("OpenAI key secret must record its scopes")
         if not isinstance(secret.get("name"), str) or not secret["name"]:
             raise ValueError("OpenAI key secret must record its name")
-    else:
+    elif require_options:
         openrouter_keys.key_options(secret)
 
 
@@ -138,7 +138,7 @@ def management_key(secrets):
 
 def create_secret(secrets, arn, token, provider):
     current, current_version = get_secret_version(secrets, arn, VersionStage="AWSCURRENT")
-    check_secret(current, provider, check_environment=True)
+    check_secret(current, provider, check_environment=True, require_options=False)
     try:
         pending = get_secret(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
         check_secret(pending, provider, check_environment=True)
@@ -146,11 +146,12 @@ def create_secret(secrets, arn, token, provider):
     except secrets.exceptions.ResourceNotFoundException:
         pass
     admin_key = management_key(secrets)
-    parameters = PROVIDERS[provider].key_options(current)
     if provider == "openrouter":
+        parameters = openrouter_keys.key_options(current, admin_key)
         key, key_id, requested_workspace, returned_workspace = openrouter_keys.create_key(
             admin_key, token, current.get("workspace_id"), parameters)
     else:
+        parameters = openai_keys.key_options(current)
         key, key_id = openai_keys.create_key(admin_key, token, parameters)
     pending = {
         **current, "api_key": key, "api_key_id": key_id,
@@ -164,9 +165,7 @@ def create_secret(secrets, arn, token, provider):
     if provider == "openrouter":
         if returned_workspace is not None and (not isinstance(returned_workspace, str) or not returned_workspace):
             workspace_error = "workspace_invalid"
-        elif requested_workspace is not None and returned_workspace != requested_workspace:
-            workspace_error = "workspace_mismatch"
-        elif "workspace_id" in current and current["workspace_id"] is None and returned_workspace is not None:
+        elif returned_workspace != requested_workspace:
             workspace_error = "workspace_mismatch"
     if workspace_error:
         audit("issued", provider, arn, token, key_id, pending)
@@ -220,7 +219,7 @@ def finish_secret(secrets, arn, token, provider, metadata):
     if old_token == token:
         raise ValueError("Pending key secret links to itself")
     previous = get_secret(secrets, arn, VersionId=old_token)
-    check_secret(previous, provider)
+    check_secret(previous, provider, require_options=False)
     if previous["api_key_id"] != old_id:
         raise ValueError("Previous key identifier differs from pending link")
     if previous["api_key_id"] == pending["api_key_id"]:
@@ -240,7 +239,7 @@ def finish_secret(secrets, arn, token, provider, metadata):
     versions = metadata["VersionIdsToStages"]
     if "AWSCURRENT" not in versions.get(token, []):
         current, current_version = get_secret_version(secrets, arn, VersionStage="AWSCURRENT")
-        check_secret(current, provider, check_environment=True)
+        check_secret(current, provider, check_environment=True, require_options=False)
         check_secret(pending, provider, check_environment=True)
         if current_version != old_token or current["api_key_id"] != old_id:
             raise ValueError("Current key differs from pending predecessor")

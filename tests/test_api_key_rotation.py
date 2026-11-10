@@ -91,6 +91,24 @@ class RotationTests(unittest.TestCase):
         value.update(changes)
         return value
 
+    def router_api(self, post_responses):
+        """Return old-key metadata on GET and queued key creations on POST."""
+        responses = iter(post_responses if isinstance(post_responses, list) else [post_responses])
+
+        def api(method, url, key, payload=None, **kwargs):
+            if method == "GET":
+                current = self.secrets.values[next(
+                    version for version, stages in self.secrets.stages.items()
+                    if "AWSCURRENT" in stages)]
+                return {"data": {"hash": current["api_key_id"], **{
+                    name: current.get(name) for name in openrouter_keys.KEY_OPTIONS
+                }}}
+            if method == "POST":
+                return next(responses)
+            raise AssertionError(f"Unexpected provider operation: {method}")
+
+        return api
+
     def pending(self, **changes):
         value = {**self.secrets.values["current"], "api_key": "pending", "api_key_id": "new-id",
                  "rotation": {"previous_version_id": "current", "previous_api_key_id": "old-id"}}
@@ -142,7 +160,7 @@ class RotationTests(unittest.TestCase):
         os.environ["API_PROVIDER"] = "openrouter"
         self.secrets.values["current"] = self.router_current()
         response = {"key": "new-workload", "data": {"hash": "new-id", "workspace_id": None}}
-        with patch.object(openrouter_keys, "call_api", return_value=response):
+        with patch.object(openrouter_keys, "call_api", side_effect=self.router_api(response)):
             rotation.rotate(self.event, self.secrets)
         self.assertNotIn("provider", self.secrets.values["token-123456789"])
 
@@ -196,11 +214,18 @@ class RotationTests(unittest.TestCase):
 
         def api(method, url, key, payload=None, **kwargs):
             calls.append((method, url, key, payload))
-            return {"key": "new-router-key", "data": {"hash": "router-hash", "workspace_id": None}}
+            return self.router_api({"key": "new-router-key", "data": {
+                "hash": "router-hash", "workspace_id": None,
+            }})(method, url, key, payload, **kwargs)
 
         with patch.object(openrouter_keys, "call_api", side_effect=api):
             rotation.rotate(self.event, self.secrets)
-        self.assertEqual(calls[0], (
+            rotation.rotate(self.event, self.secrets)  # A stored pending version is reused.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][:3], (
+            "GET", "https://openrouter.ai/api/v1/keys/old-id", "management-credential",
+        ))
+        self.assertEqual(calls[1], (
             "POST", "https://openrouter.ai/api/v1/keys", "management-credential",
             {"limit": 10, "limit_reset": "monthly", "include_byok_in_limit": False,
              "creator_user_id": None, "name": "worker-token-12"},
@@ -209,6 +234,116 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(self.secrets.values["token-123456789"]["rotation"], {
             "previous_version_id": "current", "previous_api_key_id": "old-id",
         })
+
+    def test_openrouter_hydrates_two_field_secret_from_key_hash(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"expires_at":"2027-01-01T00:00:00Z"}'
+        self.secrets.values["current"] = {"api_key": "old-workload", "api_key_id": "old/hash"}
+        calls = []
+
+        def api(method, url, key, payload=None, **kwargs):
+            calls.append((method, url, key, payload))
+            if method == "GET":
+                return {"data": {
+                    "hash": "old/hash", "name": "old-name", "limit": 100,
+                    "limit_reset": "weekly", "include_byok_in_limit": True,
+                    "creator_user_id": None, "workspace_id": "workspace-123",
+                    "expires_at": "2026-12-01T00:00:00Z",
+                }}
+            return {"key": "new-workload", "data": {"hash": "new-hash", "workspace_id": "workspace-123"}}
+
+        with patch.object(openrouter_keys, "call_api", side_effect=api), \
+             patch.object(openrouter_keys, "delete_key") as delete:
+            rotation.rotate(self.event, self.secrets)
+            self.event["Step"] = "finishSecret"
+            rotation.rotate(self.event, self.secrets)
+        self.assertEqual(calls[0][:3], (
+            "GET", "https://openrouter.ai/api/v1/keys/old%2Fhash", "management-credential",
+        ))
+        self.assertEqual(calls[1][3], {
+            "name": "old-name", "limit": 100, "limit_reset": "weekly",
+            "include_byok_in_limit": True, "creator_user_id": None,
+            "workspace_id": "workspace-123", "expires_at": "2027-01-01T00:00:00Z",
+        })
+        pending = self.secrets.values["token-123456789"]
+        self.assertEqual(pending["api_key_id"], "new-hash")
+        self.assertEqual(pending["limit"], 100)
+        self.assertNotIn("expires_at", pending)
+        self.assertEqual(len(calls), 2)  # Finishing does not re-fetch the predecessor.
+        delete.assert_called_once_with("management-credential", "old/hash")
+
+    def test_openrouter_partial_secret_fields_override_lookup(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        self.secrets.values["current"] = {
+            "api_key": "old-workload", "api_key_id": "old-id",
+            "name": "secret-name", "limit": 0, "limit_reset": None,
+            "include_byok_in_limit": False, "workspace_id": "secret-workspace",
+        }
+
+        def api(method, url, key, payload=None, **kwargs):
+            if method == "GET":
+                return {"data": {
+                    "hash": "old-id", "name": "provider-name", "limit": 100,
+                    "limit_reset": "monthly", "include_byok_in_limit": True,
+                    "creator_user_id": "creator-123", "workspace_id": "provider-workspace",
+                }}
+            return {"key": "new-workload", "data": {"hash": "new-id", "workspace_id": "secret-workspace"}}
+
+        with patch.object(openrouter_keys, "call_api", side_effect=api) as call:
+            rotation.rotate(self.event, self.secrets)
+        self.assertEqual(call.call_args.args[3], {
+            "name": "secret-name", "limit": 0, "limit_reset": None,
+            "include_byok_in_limit": False, "creator_user_id": "creator-123",
+            "workspace_id": "secret-workspace",
+        })
+        self.assertEqual(self.secrets.values["token-123456789"]["creator_user_id"], "creator-123")
+        self.assertEqual(self.secrets.values["token-123456789"]["workspace_id"], "secret-workspace")
+
+    def test_openrouter_lookup_must_match_hash_and_include_options(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        self.secrets.values["current"] = {"api_key": "old-workload", "api_key_id": "old-id"}
+        for data, message in (({"hash": "other-id"}, "does not match"),
+                              ({"hash": "old-id", "name": "only-name"}, "lacks policy")):
+            with self.subTest(message=message), \
+                 patch.object(openrouter_keys, "call_api", return_value={"data": data}), \
+                 patch.object(openrouter_keys, "create_key") as create:
+                with self.assertRaisesRegex(ValueError, message):
+                    rotation.rotate(self.event, self.secrets)
+                create.assert_not_called()
+                self.assertNotIn("token-123456789", self.secrets.values)
+
+    def test_openrouter_lookup_rejects_disabled_or_external_key(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        self.secrets.values["current"] = {"api_key": "old-workload", "api_key_id": "old-id"}
+        base = {"hash": "old-id", "name": "name", "limit": None,
+                "limit_reset": None, "include_byok_in_limit": False,
+                "creator_user_id": None, "workspace_id": "workspace-123"}
+        for extra in ({"disabled": True}, {"external_user": "user-123"}):
+            with self.subTest(extra=extra), \
+                 patch.object(openrouter_keys, "call_api", return_value={"data": {**base, **extra}}), \
+                 patch.object(openrouter_keys, "create_key") as create:
+                with self.assertRaisesRegex(ValueError, "cannot be reproduced"):
+                    rotation.rotate(self.event, self.secrets)
+                create.assert_not_called()
+
+    def test_openrouter_complete_secret_still_verifies_old_hash_and_state(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        self.secrets.values["current"] = self.router_current()
+        metadata = {"hash": "old-id", **{
+            field: self.secrets.values["current"][field] for field in openrouter_keys.KEY_OPTIONS
+        }}
+        for change, message in (({"hash": "wrong-id"}, "does not match"),
+                                ({"disabled": True}, "cannot be reproduced"),
+                                ({"external_user": "user-123"}, "cannot be reproduced")):
+            with self.subTest(change=change), \
+                 patch.object(openrouter_keys, "call_api", return_value={"data": {**metadata, **change}}) as api, \
+                 patch.object(openrouter_keys, "create_key") as create:
+                with self.assertRaisesRegex(ValueError, message):
+                    rotation.rotate(self.event, self.secrets)
+                api.assert_called_once_with(
+                    "GET", "https://openrouter.ai/api/v1/keys/old-id", "management-credential")
+                create.assert_not_called()
+                self.assertNotIn("token-123456789", self.secrets.values)
 
     def test_openrouter_replicates_secret_fields_including_false_zero_and_null(self):
         os.environ["API_PROVIDER"] = "openrouter"
@@ -223,7 +358,7 @@ class RotationTests(unittest.TestCase):
             "creator_user_id": "existing-user", "expires_at": "2026-01-01T00:00:00Z",
         }
         response = {"key": "new-router-key", "data": {"hash": "router-hash", "workspace_id": None}}
-        with patch.object(openrouter_keys, "call_api", return_value=response) as api:
+        with patch.object(openrouter_keys, "call_api", side_effect=self.router_api(response)) as api:
             rotation.rotate(self.event, self.secrets)
         self.assertEqual(api.call_args.args[3], {
             "name": "existing-name", "limit": 0, "limit_reset": None,
@@ -243,18 +378,40 @@ class RotationTests(unittest.TestCase):
         response = {"key": "new-router-key", "data": {
             "hash": "router-hash", "workspace_id": "other-workspace",
         }}
-        with patch.object(openrouter_keys, "call_api", return_value=response), \
+        with patch.object(openrouter_keys, "call_api", side_effect=self.router_api(response)), \
              patch.object(openrouter_keys, "delete_key") as delete:
             with self.assertRaisesRegex(ValueError, "did not confirm"):
                 rotation.rotate(self.event, self.secrets)
         delete.assert_called_once_with("management-credential", "router-hash")
         self.assertNotIn("token-123456789", self.secrets.values)
 
+    def test_openrouter_hydrated_null_workspace_rejects_provider_assignment(self):
+        os.environ["API_PROVIDER"] = "openrouter"
+        self.secrets.values["current"] = {"api_key": "old-workload", "api_key_id": "old-id"}
+
+        def api(method, url, key, payload=None, **kwargs):
+            if method == "GET":
+                return {"data": {
+                    "hash": "old-id", "name": "old-name", "limit": None,
+                    "limit_reset": None, "include_byok_in_limit": False,
+                    "creator_user_id": None, "workspace_id": None,
+                }}
+            return {"key": "new-workload", "data": {
+                "hash": "new-id", "workspace_id": "unexpected-workspace",
+            }}
+
+        with patch.object(openrouter_keys, "call_api", side_effect=api), \
+             patch.object(openrouter_keys, "delete_key") as delete:
+            with self.assertRaisesRegex(ValueError, "did not confirm"):
+                rotation.rotate(self.event, self.secrets)
+        delete.assert_called_once_with("management-credential", "new-id")
+        self.assertNotIn("token-123456789", self.secrets.values)
+
     def test_openrouter_null_workspace_requires_explicit_provider_confirmation(self):
         os.environ["API_PROVIDER"] = "openrouter"
         self.secrets.values["current"] = self.router_current()
         response = {"key": "new-router-key", "data": {"hash": "router-hash"}}
-        with patch.object(openrouter_keys, "call_api", return_value=response), \
+        with patch.object(openrouter_keys, "call_api", side_effect=self.router_api(response)), \
              patch.object(openrouter_keys, "delete_key") as delete:
             with self.assertRaisesRegex(ValueError, "did not confirm"):
                 rotation.rotate(self.event, self.secrets)
@@ -278,19 +435,21 @@ class RotationTests(unittest.TestCase):
         response = {"key": "new-router-key", "data": {
             "hash": "router-hash", "workspace_id": "secret-workspace",
         }}
-        with patch.object(openrouter_keys, "call_api", return_value=response) as api:
+        with patch.object(openrouter_keys, "call_api", side_effect=self.router_api(response)) as api:
             rotation.rotate(self.event, self.secrets)
         self.assertEqual(api.call_args.args[3]["workspace_id"], "secret-workspace")
         self.assertEqual(self.secrets.values["token-123456789"]["workspace_id"], "secret-workspace")
 
-    def test_openrouter_requires_secret_options_even_with_configuration(self):
+    def test_openrouter_rejects_incomplete_lookup_even_with_configuration(self):
         os.environ["API_PROVIDER"] = "openrouter"
         os.environ["OPENROUTER_KEY_OPTIONS_JSON"] = '{"workspace_id":"configured-workspace"}'
         self.secrets.values["current"] = {
             "api_key": "old-workload", "api_key_id": "old-id",
         }
-        with patch.object(openrouter_keys, "create_key") as create:
-            with self.assertRaisesRegex(ValueError, "record all key options"):
+        with patch.object(openrouter_keys, "call_api", return_value={
+                "data": {"hash": "old-id", "name": "old-name"}}), \
+             patch.object(openrouter_keys, "create_key") as create:
+            with self.assertRaisesRegex(ValueError, "metadata lacks policy options"):
                 rotation.rotate(self.event, self.secrets)
         create.assert_not_called()
 
@@ -302,7 +461,7 @@ class RotationTests(unittest.TestCase):
             {"key": "first-key", "data": {"hash": "first-id", "workspace_id": "first-workspace"}},
             {"key": "second-key", "data": {"hash": "second-id", "workspace_id": "first-workspace"}},
         ]
-        with patch.object(openrouter_keys, "call_api", side_effect=responses) as api, \
+        with patch.object(openrouter_keys, "call_api", side_effect=self.router_api(responses)) as api, \
              patch.object(openrouter_keys, "delete_key"):
             rotation.rotate(self.event, self.secrets)
             self.event["Step"] = "finishSecret"
@@ -311,7 +470,7 @@ class RotationTests(unittest.TestCase):
             self.secrets.stages["token-234567890"] = ["AWSPENDING"]
             self.event.update(ClientRequestToken="token-234567890", Step="createSecret")
             rotation.rotate(self.event, self.secrets)
-        self.assertEqual(api.call_args_list[1].args[3]["workspace_id"], "first-workspace")
+        self.assertEqual(api.call_args_list[3].args[3]["workspace_id"], "first-workspace")
         self.assertEqual(self.secrets.values["token-234567890"]["workspace_id"], "first-workspace")
 
     def test_openrouter_workspace_mismatch_revokes_unstored_key(self):
@@ -321,7 +480,7 @@ class RotationTests(unittest.TestCase):
         response = {"key": "new-router-key", "data": {
             "hash": "router-hash", "workspace_id": "other-workspace",
         }}
-        with patch.object(openrouter_keys, "call_api", return_value=response), \
+        with patch.object(openrouter_keys, "call_api", side_effect=self.router_api(response)), \
              patch.object(openrouter_keys, "delete_key") as delete:
             with self.assertRaisesRegex(ValueError, "did not confirm"):
                 rotation.rotate(self.event, self.secrets)
@@ -337,7 +496,7 @@ class RotationTests(unittest.TestCase):
             if returned_workspace is not None:
                 response["data"]["workspace_id"] = returned_workspace
             with self.subTest(returned_workspace=returned_workspace), \
-                 patch.object(openrouter_keys, "call_api", return_value=response), \
+                 patch.object(openrouter_keys, "call_api", side_effect=self.router_api(response)), \
                  patch.object(openrouter_keys, "delete_key") as delete:
                 with self.assertRaisesRegex(ValueError, "did not confirm"):
                     rotation.rotate(self.event, self.secrets)

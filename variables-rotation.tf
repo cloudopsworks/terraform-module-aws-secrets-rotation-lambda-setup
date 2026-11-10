@@ -29,10 +29,11 @@
 #   # The external target secret must contain api_key and api_key_id. Provider selection comes only from
 #   # settings.type; no provider field is needed in the secret. OpenAI targets also require
 #   # project_id, service_account_id, name, and scopes matching the current OpenAI key. OpenRouter targets
-#   # must record all non-expiration key options: name, limit, limit_reset, include_byok_in_limit,
-#   # creator_user_id, and workspace_id (null marks no workspace and is omitted from the create request).
-#   # Missing key options fail rotation; settings cannot silently replace them. Old expiration is not copied.
-#   api_key_name: "rotated-api-key"  # (Optional) Legacy setting ignored for API-key rotation; target-secret name is required.
+#   # can seed non-expiration key options (name, limit, limit_reset, include_byok_in_limit,
+#   # creator_user_id, workspace_id); missing options are read by hash from the management API.
+#   # Explicit secret values win, including null/false/0. Workspace null is omitted from the create request.
+#   # Lookup failure or incomplete metadata fails rotation; old expiration is not copied.
+#   api_key_name: "rotated-api-key"  # (Optional) Legacy setting ignored for API-key rotation; OpenAI reads name from the target secret and OpenRouter can retrieve it by hash.
 #   management_api_key:             # (Required for openai/openrouter) Pre-existing management credential secret; this module never creates or updates it. SecretString must contain JSON {"api_key":"<upstream management key>"}.
 #     secret_arn: "arn:aws:secretsmanager:<region>:<account>:secret:<name>" # (Required) Plan-time-known name or ARN of the existing AWS Secrets Manager secret. Its ARN and KMS key are resolved automatically.
 #   openai:                        # (Required when type is openai) Existing OpenAI project and service-account identifiers.
@@ -41,12 +42,12 @@
 #     scopes: ["<scope>"]        # (Optional) Legacy setting ignored; required scopes come from the target secret.
 #     expires_in_seconds: 2592000 # (Optional) New key lifetime in seconds, 1 through 31536000, or null for no expiry. Default: OpenAI API default.
 #   openrouter:                    # (Optional when type is openrouter) New expiration and legacy key settings.
-#     limit: 10.0                  # (Optional) Legacy setting ignored; required spending limit comes from the target secret.
-#     limit_reset: daily           # (Optional) Legacy setting ignored; required reset interval comes from the target secret.
-#     include_byok_in_limit: false # (Optional) Legacy setting ignored; required value comes from the target secret.
+#     limit: 10.0                  # (Optional) Legacy setting ignored; effective limit comes from the target secret or OpenRouter key metadata.
+#     limit_reset: daily           # (Optional) Legacy setting ignored; effective reset interval comes from the target secret or OpenRouter key metadata.
+#     include_byok_in_limit: false # (Optional) Legacy setting ignored; effective value comes from the target secret or OpenRouter key metadata.
 #     expires_at: "2027-01-01T00:00:00Z" # (Optional) UTC ISO-8601 expiration with seconds. Default: provider default.
-#     workspace_id: "<uuid>"       # (Optional) Legacy setting ignored; required workspace_id comes from the target secret.
-#     creator_user_id: "user_..."  # (Optional) Legacy setting ignored; required creator_user_id comes from the target secret.
+#     workspace_id: "<uuid>"       # (Optional) Legacy setting ignored; workspace_id comes from the target secret or OpenRouter key metadata.
+#     creator_user_id: "user_..."  # (Optional) Legacy setting ignored; creator_user_id comes from the target secret or OpenRouter key metadata.
 #   # OpenRouter external keys are not supported because they may contain a credential; do not put them in Terraform inputs.
 #   allowed_kms:                  # (Optional) KMS key ARNs used to decrypt the allowed target secrets.
 #     - arn:aws:kms:<region>:<account>:key/<key-id>
