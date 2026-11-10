@@ -356,13 +356,15 @@ class OpenAIRotationTests(unittest.TestCase):
         self.assertTrue(any(call[1].endswith("/api_keys/" + self.new_id)
                             for call in self.calls_for("GET")))
 
-    def test_member_role_uses_management_validation_even_with_model_scope(self):
-        self.project(scopes=["api.model.read"], role="member")
+    def test_unrestricted_member_validates_with_pending_key_against_models(self):
+        self.project(role="member")
         self.provider_role = "member"
         self.rotate("createSecret")
         self.rotate("testSecret")
+        probes = [call for call in self.calls_for("GET") if call[1].endswith("/models")]
+        self.assertEqual([self.new_value], [call[2] for call in probes])
         self.rotate("finishSecret")
-        self.assertFalse(any(call[1].endswith("/models") for call in self.calls))
+        self.assertIn("AWSCURRENT", self.secrets.stages[self.token])
 
     def test_positive_plaintext_probe_auth_failure_blocks_promotion(self):
         self.project(scopes=["api.model.read"])
@@ -415,6 +417,26 @@ class OpenAIRotationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "organization-bound"):
             self.rotate("createSecret")
         self.assertEqual([], self.calls_for("POST"))
+
+    def test_legacy_management_secret_fails_with_safe_diagnostic_before_intent(self):
+        self.project(role="member")
+        self.secrets.rotation_rules = {"AutomaticallyAfterDays": 30}
+        self.secrets.management = json.dumps({"api_key": "management-credential"})
+        event = {"SecretId": self.arn, "ClientRequestToken": self.token,
+                 "Step": "createSecret"}
+        with patch.object(rotation.boto3, "client", return_value=self.secrets), \
+                patch.object(openai_keys, "call_api") as provider, \
+                self.assertLogs(rotation.LOG, level="ERROR") as logs:
+            with self.assertRaisesRegex(RuntimeError, "^API key rotation failed$"):
+                rotation.lambda_handler(event, None)
+        self.assertEqual(
+            ["API key rotation failed: provider=openai step=createSecret "
+             "error_type=OpenAIManagementSecretError"],
+            [record.getMessage() for record in logs.records],
+        )
+        provider.assert_not_called()
+        self.assertEqual([], self.secrets.put_calls)
+        self.assertIn("AWSCURRENT", self.secrets.stages["current"])
 
     def test_management_key_is_independent_and_organization_bound_on_create(self):
         self.rotate("createSecret")

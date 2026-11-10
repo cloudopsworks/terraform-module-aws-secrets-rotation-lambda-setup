@@ -39,6 +39,10 @@ RATE_PATTERN = re.compile(r"^rate\((\d+) (hour|hours|day|days)\)$")
 DURATION_PATTERN = re.compile(r"^(\d+)h$")
 
 
+class OpenAIManagementSecretError(ValueError):
+    """The configured management secret does not bind an independent key to the organization."""
+
+
 def utcnow():
     return datetime.now(timezone.utc)
 
@@ -193,7 +197,9 @@ def management_key(secrets, target_arn, target_key=None):
             not data["api_key"] or not isinstance(organization_id, str) or
             not organization_id or data.get("organization_id") != organization_id or
             data["api_key"] == target_key):
-        raise ValueError("Independent organization-bound OpenAI management key is required")
+        raise OpenAIManagementSecretError(
+            "Independent organization-bound OpenAI management key is required"
+        )
     return data["api_key"], organization_id
 
 

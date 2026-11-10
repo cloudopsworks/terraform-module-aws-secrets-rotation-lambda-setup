@@ -127,14 +127,14 @@ def delete_key(management_key, config, key_id, organization_id):
 def validate_key(plaintext, config, organization_id):
     """Probe candidate auth only where the endpoint is authorized.
 
-    Project keys without a known owner role and model-read permission cannot
+    Project keys without a known project role and model-read permission cannot
     safely use /models. Their provider metadata is checked with get_key.
     """
     if config["key_type"] == "admin":
         path = "/organization/admin_api_keys"
     elif config["key_type"] == "project":
         scopes = config["scopes"]
-        if (config["role"] != "owner" or
+        if (config["role"] not in ("owner", "member") or
                 (scopes is not None and scopes and "api.model.read" not in scopes)):
             raise NotImplementedError("No safe plaintext probe for these OpenAI key scopes")
         path = "/models"
