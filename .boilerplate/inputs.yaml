@@ -11,6 +11,7 @@ settings:
   password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
   # For type: openai or openrouter, supply a pre-existing AWS Secrets Manager management secret.
   # OpenAI requires JSON {"api_key":"<admin management key>","organization_id":"<organization ID>"}.
+  # Use exactly one credential field: api_key, admin_api_key, or management_api_key.
   # OpenRouter requires JSON {"api_key":"<management key>"}. This module never manages either secret.
   # Never put the management key value in Terraform inputs.
   # Seed the external target secret separately. Both API-key providers require

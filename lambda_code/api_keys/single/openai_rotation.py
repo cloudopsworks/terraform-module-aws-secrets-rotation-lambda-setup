@@ -22,6 +22,7 @@ import openai_keys
 LOG = logging.getLogger(__name__)
 INTENT_STAGE = "ROTATIONINTENT"
 BOOTSTRAP_ID = "__CREATE_NEW__"
+MANAGEMENT_KEY_FIELDS = frozenset({"api_key", "admin_api_key", "management_api_key"})
 CONFIG_FIELDS = frozenset({
     "schema_version", "key_type", "name", "project_id", "service_account_id",
     "scopes", "role", "expires_in_seconds",
@@ -190,17 +191,26 @@ def management_key(secrets, target_arn, target_key=None):
     management_arn = os.environ["MANAGEMENT_SECRET_ARN"]
     if target_arn == management_arn:
         raise ValueError("Target secret cannot be its own management credential")
+    LOG.info("openai_rotation action=load_management_key")
     value = secrets.get_secret_value(SecretId=management_arn)
     data = json.loads(value["SecretString"])
     organization_id = os.environ["OPENAI_ORGANIZATION_ID"]
-    if (not isinstance(data, dict) or not isinstance(data.get("api_key"), str) or
-            not data["api_key"] or not isinstance(organization_id, str) or
-            not organization_id or data.get("organization_id") != organization_id or
-            data["api_key"] == target_key):
-        raise OpenAIManagementSecretError(
-            "Independent organization-bound OpenAI management key is required"
-        )
-    return data["api_key"], organization_id
+    fields = MANAGEMENT_KEY_FIELDS.intersection(data) if isinstance(data, dict) else ()
+    key = data[next(iter(fields))] if len(fields) == 1 else None
+    if not isinstance(key, str) or not key.strip():
+        reason = "invalid_credential_field"
+    elif data.get("organization_id") is None:
+        reason = "organization_missing"
+    elif not organization_id or data["organization_id"] != organization_id:
+        reason = "organization_mismatch"
+    elif key == target_key:
+        reason = "matches_target_key"
+    else:
+        return key, organization_id
+    LOG.warning("openai_rotation action=reject_management_key reason=%s", reason)
+    raise OpenAIManagementSecretError(
+        "Independent organization-bound OpenAI management key is required"
+    )
 
 
 def check_snapshot(snapshot, arn, token):
@@ -307,30 +317,34 @@ def rotate(event, secrets):
         raise ValueError("Rotation secret or token is invalid")
     if step not in ("createSecret", "setSecret", "testSecret", "finishSecret", "reconcileOrphan"):
         raise ValueError("Unsupported rotation step")
+    LOG.info("openai_rotation step=%s status=started", step)
     if step == "reconcileOrphan":
         reconcile_orphan(secrets, secret_metadata(secrets, arn), event)
-        return
-    metadata = rotation_metadata(secrets, arn, token)
-    if "AWSCURRENT" in metadata["VersionIdsToStages"].get(token, ()) and step != "finishSecret":
-        return
-    if step == "createSecret":
-        create_secret(secrets, metadata, event)
-    elif step == "setSecret":
-        set_secret(secrets, arn, token)
-    elif step == "testSecret":
-        test_secret(secrets, arn, token)
     else:
-        finish_secret(secrets, metadata, token)
+        metadata = rotation_metadata(secrets, arn, token)
+        if "AWSCURRENT" in metadata["VersionIdsToStages"].get(token, ()) and step != "finishSecret":
+            LOG.info("openai_rotation action=skip_already_current")
+        elif step == "createSecret":
+            create_secret(secrets, metadata, event)
+        elif step == "setSecret":
+            set_secret(secrets, arn, token)
+        elif step == "testSecret":
+            test_secret(secrets, arn, token)
+        else:
+            finish_secret(secrets, metadata, token)
+    LOG.info("openai_rotation step=%s status=completed", step)
 
 
 def create_secret(secrets, metadata, event):
     arn, token = metadata["ARN"], event["ClientRequestToken"]
+    LOG.info("openai_rotation action=check_existing_pending")
     try:
         pending, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
     except secrets.exceptions.ResourceNotFoundException:
         pending = None
     if pending is not None:
         check_pending(pending, token_intent(secrets, arn, token)["snapshot"])
+        LOG.info("openai_rotation action=reuse_pending")
         return
     intent = read_intent(secrets, arn)
     if intent is not None:
@@ -338,6 +352,7 @@ def create_secret(secrets, metadata, event):
             raise RuntimeError("Another OpenAI rotation is unfinished")
         LOG.error("openai_rotation orphan_reconciliation_required secret_id=%s version_id=%s", arn, token)
         raise RuntimeError("Possible orphaned OpenAI key; reconcile ROTATIONINTENT")
+    LOG.info("openai_rotation action=read_configuration")
     config, config_version_id = read_config(secrets, arn)
     current, previous_version_id = read_json(secrets, arn, VersionStage="AWSCURRENT")
     stages = metadata["VersionIdsToStages"].get(previous_version_id, ())
@@ -361,8 +376,10 @@ def create_secret(secrets, metadata, event):
         previous_account = current["service_account_id"]
     ttl, safety = effective_ttl(config, metadata)
     admin_key, organization_id = management_key(secrets, arn, current.get("api_key"))
+    LOG.info("openai_rotation action=verify_management_key")
     openai_keys.validate_key(admin_key, {"key_type": "admin"}, organization_id)
     if config["key_type"] == "project":
+        LOG.info("openai_rotation action=verify_service_account")
         service_account = openai_keys.get_service_account(admin_key, config, organization_id)
         if config["role"] is not None and service_account.get("role") != config["role"]:
             raise ValueError("OpenAI service-account role differs from TFCONFIG")
@@ -382,6 +399,7 @@ def create_secret(secrets, metadata, event):
     }
     extra = {"RotationToken": event["RotationToken"]} if event.get("RotationToken") else {}
     # If this write errors ambiguously, do not call the non-idempotent API.
+    LOG.info("openai_rotation action=write_intent")
     secrets.put_secret_value(
         SecretId=arn, ClientRequestToken=snapshot["intent_version_id"],
         SecretString=json.dumps(intent, sort_keys=True), VersionStages=[INTENT_STAGE], **extra,
@@ -389,6 +407,7 @@ def create_secret(secrets, metadata, event):
     saved_intent = token_intent(secrets, arn, token)
     if saved_intent != intent:
         raise RuntimeError("Rotation intent ownership changed")
+    LOG.info("openai_rotation action=issue_replacement")
     key, key_id = openai_keys.create_key(admin_key, {**config, "expires_in_seconds": ttl}, organization_id)
     LOG.info("openai_rotation issued secret_id=%s version_id=%s key_id=%s", arn, token, key_id)
     if key == admin_key or key_id == previous_id:
@@ -398,12 +417,14 @@ def create_secret(secrets, metadata, event):
         "name": config["name"], "project_id": config["project_id"],
         "service_account_id": config["service_account_id"],
     }
+    LOG.info("openai_rotation action=write_pending")
     try:
         secrets.put_secret_value(
             SecretId=arn, ClientRequestToken=token,
             SecretString=json.dumps(pending, sort_keys=True), VersionStages=["AWSPENDING"], **extra,
         )
     except Exception:
+        LOG.info("openai_rotation action=verify_pending_after_write_error")
         try:
             saved, _ = read_json(secrets, arn, VersionId=token)
         except Exception:
@@ -417,6 +438,7 @@ def create_secret(secrets, metadata, event):
 
 
 def set_secret(secrets, arn, token):
+    LOG.info("openai_rotation action=check_pending_staging")
     pending, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
     snapshot = token_intent(secrets, arn, token)["snapshot"]
     check_pending(pending, snapshot)
@@ -424,12 +446,15 @@ def set_secret(secrets, arn, token):
 
 
 def test_secret(secrets, arn, token):
+    LOG.info("openai_rotation action=check_pending_staging")
     pending, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSPENDING")
     snapshot = token_intent(secrets, arn, token)["snapshot"]
     check_pending(pending, snapshot)
     admin_key, organization_id = management_key(secrets, arn, pending["api_key"])
+    LOG.info("openai_rotation action=check_provider_metadata")
     details = openai_keys.get_key(admin_key, snapshot["config"], pending["api_key_id"], organization_id)
     check_provider_key(details, snapshot, pending["api_key_id"])
+    LOG.info("openai_rotation action=check_pending_auth")
     try:
         openai_keys.validate_key(pending["api_key"], snapshot["config"], organization_id)
     except NotImplementedError:
@@ -438,10 +463,13 @@ def test_secret(secrets, arn, token):
         # the strongest available checks for these keys; never accept 401/403.
         LOG.info("openai_rotation management_metadata_only secret_id=%s version_id=%s key_id=%s",
                  arn, token, pending["api_key_id"])
+    else:
+        LOG.info("openai_rotation action=pending_auth_verified")
 
 
 def finish_secret(secrets, metadata, token):
     arn = metadata["ARN"]
+    LOG.info("openai_rotation action=check_promotion_state")
     already_current = "AWSCURRENT" in metadata["VersionIdsToStages"].get(token, ())
     intent = read_intent(secrets, arn)
     if already_current and (intent is None or intent["token"] != token):
@@ -449,6 +477,7 @@ def finish_secret(secrets, metadata, token):
             raise ValueError("Pending label remains without rotation intent")
         current, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSCURRENT")
         check_credential(current)
+        LOG.info("openai_rotation action=skip_completed_rotation")
         return
     if intent is None or intent["token"] != token:
         raise ValueError("Rotation intent does not match token")
@@ -472,10 +501,13 @@ def finish_secret(secrets, metadata, token):
         if current_version != previous_id or current != previous:
             raise ValueError("Current key changed before promotion")
         test_secret(secrets, arn, token)
+        LOG.info("openai_rotation action=promote_pending")
         secrets.update_secret_version_stage(
             SecretId=arn, VersionStage="AWSCURRENT",
             MoveToVersionId=token, RemoveFromVersionId=previous_id,
         )
+    else:
+        LOG.info("openai_rotation action=resume_after_promotion")
     stages = secrets.describe_secret(SecretId=arn)["VersionIdsToStages"]
     if "AWSCURRENT" not in stages.get(token, ()) or "AWSPREVIOUS" not in stages.get(previous_id, ()):
         raise ValueError("Rotation stages changed before predecessor retirement")
@@ -484,20 +516,26 @@ def finish_secret(secrets, metadata, token):
         raise ValueError("Promoted credential differs from saved pending version")
     if kind not in ("admin_new", "project_new"):
         admin_key, organization_id = management_key(secrets, arn, previous["api_key"])
+        LOG.info("openai_rotation action=retire_predecessor")
         openai_keys.delete_key(admin_key, snapshot["config"], snapshot["previous_api_key_id"], organization_id)
         LOG.info("openai_rotation retired secret_id=%s version_id=%s key_id=%s", arn, previous_id, snapshot["previous_api_key_id"])
+    else:
+        LOG.info("openai_rotation action=no_predecessor_to_retire")
     stages = secrets.describe_secret(SecretId=arn)["VersionIdsToStages"]
     if "AWSCURRENT" not in stages.get(token, ()):
         raise ValueError("Current stage changed before pending cleanup")
     if "AWSPENDING" in stages.get(token, ()):
+        LOG.info("openai_rotation action=clear_pending_stage")
         secrets.update_secret_version_stage(
             SecretId=arn, VersionStage="AWSPENDING", RemoveFromVersionId=token,
         )
+    LOG.info("openai_rotation action=clear_intent")
     clear_completed_intent(secrets, arn, token)
 
 
 def reconcile_orphan(secrets, metadata, event):
     arn, token = metadata["ARN"], event["ClientRequestToken"]
+    LOG.info("openai_rotation action=check_orphan_intent")
     key_id, intent_id = event.get("OrphanKeyId"), event.get("IntentVersionId")
     no_key_created = event.get("NoKeyCreatedConfirmed") is True
     if (not isinstance(intent_id, str) or not intent_id or
@@ -519,6 +557,7 @@ def reconcile_orphan(secrets, metadata, event):
     if key_id is not None and key_id == intent["snapshot"]["previous_api_key_id"]:
         raise ValueError("Cannot reconcile predecessor as orphan")
     if not no_key_created:
+        LOG.info("openai_rotation action=verify_orphan_identity")
         for version_id, stages in metadata["VersionIdsToStages"].items():
             if not ({"AWSCURRENT", "AWSPENDING", "AWSPREVIOUS"} & set(stages)):
                 continue
@@ -530,7 +569,11 @@ def reconcile_orphan(secrets, metadata, event):
             admin_key, intent["snapshot"]["config"], key_id, organization_id)
         if details is not None:
             check_provider_key(details, intent["snapshot"], key_id, require_lifetime=False)
+        LOG.info("openai_rotation action=revoke_orphan_key")
         openai_keys.delete_key(admin_key, intent["snapshot"]["config"], key_id, organization_id)
+    else:
+        LOG.info("openai_rotation action=no_orphan_key_confirmed")
+    LOG.info("openai_rotation action=clear_intent")
     secrets.update_secret_version_stage(
         SecretId=arn, VersionStage=INTENT_STAGE, RemoveFromVersionId=intent_id,
     )
