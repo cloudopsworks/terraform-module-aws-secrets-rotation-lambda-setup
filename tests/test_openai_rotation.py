@@ -125,6 +125,214 @@ class OpenAIRotationTests(unittest.TestCase):
                        if "ROTATIONINTENT" in stages)
         return self.secrets.values[version]
 
+    def handoff(self, retire=True):
+        return {"PreviousVersionId": "current", "RetirePreviousKey": retire}
+
+    def old_project(self):
+        self.project(bootstrap=False)
+        self.secrets.values["current"].update({
+            "project_id": "proj_old", "service_account_id": "svc_old"})
+        original = self.provider
+        def provider(method, url, key, payload=None, **kwargs):
+            result = original(method, url, key, payload, **kwargs)
+            if method == "GET" and "/proj_old/api_keys/" in url:
+                result["owner"]["service_account"]["id"] = "svc_old"
+                result["name"] = "bootstrap-key"
+            return result
+        self.provider = provider
+
+    def test_operator_handoff_retires_cross_account_using_old_project(self):
+        self.old_project()
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.assertIn("AWSCURRENT", self.secrets.stages["current"])
+        self.assertEqual(2, self.intent()["snapshot"]["schema_version"])
+        self.rotate("finishSecret")
+        self.assertIn("/projects/proj_old/api_keys/key_bootstrap", self.calls_for("DELETE")[0][1])
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+        self.assertEqual(1, len(self.calls_for("POST")))
+
+    def test_operator_handoff_preserves_incomplete_legacy_predecessor(self):
+        self.project(bootstrap=False)
+        self.secrets.values["current"] = {"api_key": "legacy-private", "provider": "old"}
+        with self.assertLogs(rotation.openai_rotation.LOG, level="INFO") as logs:
+            self.rotate("createSecret", CredentialHandoff=self.handoff(False))
+            self.rotate("finishSecret")
+        self.assertEqual([], self.calls_for("DELETE"))
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+        self.assertIn("predecessor_retirement_deferred", "\n".join(logs.output))
+        self.assertNotIn("legacy-private", "\n".join(logs.output))
+        self.assertNotIn("management-credential", "\n".join(logs.output))
+        self.assertNotIn(self.new_value, "\n".join(logs.output))
+
+    def test_operator_handoff_rejects_unknown_identity_when_retirement_requested(self):
+        self.secrets.values["current"] = {"api_key": "legacy-private", "api_key_id": "old"}
+        self.secrets.stages["current"] = ["AWSCURRENT"]
+        with self.assertRaises(ValueError):
+            self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.assertEqual([], self.secrets.put_calls)
+        self.assertEqual([], self.calls_for("POST"))
+
+    def test_operator_handoff_rejects_bootstrap_retirement(self):
+        with self.assertRaises(ValueError):
+            self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.assertEqual([], self.secrets.put_calls)
+
+    def test_operator_handoff_rejects_malformed_or_unpinned_event_before_writes(self):
+        for handoff in (None, {}, {"PreviousVersionId": "current", "RetirePreviousKey": 1},
+                        {"PreviousVersionId": "other", "RetirePreviousKey": False},
+                        {**self.handoff(False), "extra": True}):
+            with self.subTest(handoff=handoff), self.assertRaises(ValueError):
+                self.rotate("createSecret", CredentialHandoff=handoff)
+        with self.assertRaises(ValueError):
+            self.rotate("finishSecret", CredentialHandoff=self.handoff(False))
+        self.assertEqual([], self.secrets.put_calls)
+        self.assertEqual([], self.calls)
+
+    def test_operator_handoff_old_metadata_mismatch_blocks_issuance(self):
+        self.old_project()
+        self.secrets.values["current"]["service_account_id"] = "svc_unconfirmed"
+        with self.assertRaisesRegex(ValueError, "different service account"):
+            self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.assertEqual([], self.secrets.put_calls)
+        self.assertEqual([], self.calls_for("POST"))
+
+    def test_operator_handoff_retry_cannot_change_pinned_policy(self):
+        self.old_project()
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        with self.assertRaisesRegex(ValueError, "pinned rotation intent"):
+            self.rotate("createSecret", CredentialHandoff=self.handoff(False))
+        with self.assertRaisesRegex(ValueError, "pinned rotation intent"):
+            self.rotate("createSecret", CredentialHandoff={**self.handoff(), "PreviousVersionId": "other"})
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.rotate("createSecret")
+        self.assertEqual(1, len(self.calls_for("POST")))
+
+    def test_operator_handoff_snapshot_rejects_invalid_versions_fields_and_identity(self):
+        self.old_project()
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        snapshot = self.intent()["snapshot"]
+        for changes in ({"schema_version": 1}, {"schema_version": True},
+                        {"previous_secret_sha256": "bad"}, {"retire_previous_key": 1},
+                        {"retire_previous_key": False}, {"previous_key_type": "unknown"},
+                        {"previous_service_account_id": None}, {"bootstrap_kind": "existing"},
+                        {"previous_version_id": self.token}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                rotation.openai_rotation.check_snapshot({**snapshot, **changes}, self.arn, self.token)
+
+    def test_operator_handoff_digest_and_version_tampering_blocks_promotion(self):
+        self.old_project()
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        snapshot = self.intent()["snapshot"]
+        original = copy.deepcopy(snapshot)
+        for changes in ({"previous_secret_sha256": "0" * 64},
+                        {"previous_version_id": "config-v1"}):
+            snapshot.update(changes)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.rotate("finishSecret")
+            snapshot.clear()
+            snapshot.update(original)
+        self.assertIn("AWSCURRENT", self.secrets.stages["current"])
+        self.assertEqual([], self.calls_for("DELETE"))
+
+    def test_operator_handoff_retry_after_promotion_and_delete_failure_does_not_reissue(self):
+        self.old_project()
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        provider = self.provider
+        def failed_delete(method, *args, **kwargs):
+            if method == "DELETE":
+                raise RuntimeError("temporary failure")
+            return provider(method, *args, **kwargs)
+        self.provider = failed_delete
+        with self.assertRaisesRegex(RuntimeError, "temporary failure"):
+            self.rotate("finishSecret")
+        self.assertIn("AWSCURRENT", self.secrets.stages[self.token])
+        self.assertEqual("operator_handoff", self.intent()["snapshot"]["bootstrap_kind"])
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.provider = provider
+        self.rotate("finishSecret")
+        self.assertEqual(1, len(self.calls_for("POST")))
+        self.assertIn("/projects/proj_old/api_keys/", self.calls_for("DELETE")[0][1])
+
+    def test_operator_handoff_already_missing_predecessor_is_idempotent(self):
+        self.old_project()
+        provider = self.provider
+        def missing_old(method, url, *args, **kwargs):
+            if method == "GET" and "/proj_old/api_keys/" in url:
+                return {"deleted": True}
+            return provider(method, url, *args, **kwargs)
+        self.provider = missing_old
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.rotate("finishSecret")
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+        self.assertEqual(1, len(self.calls_for("DELETE")))
+
+    def test_operator_handoff_rechecks_old_metadata_before_delete(self):
+        self.old_project()
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        provider = self.provider
+        def drifted_old(method, url, *args, **kwargs):
+            result = provider(method, url, *args, **kwargs)
+            if method == "GET" and "/proj_old/api_keys/" in url:
+                result["owner"]["service_account"]["id"] = "svc_unknown"
+            return result
+        self.provider = drifted_old
+        with self.assertRaises(ValueError):
+            self.rotate("finishSecret")
+        self.assertEqual([], self.calls_for("DELETE"))
+        self.assertIn("AWSCURRENT", self.secrets.stages[self.token])
+        self.assertEqual("operator_handoff", self.intent()["snapshot"]["bootstrap_kind"])
+
+    def test_operator_handoff_preserve_pins_digest_without_plaintext_or_identity(self):
+        self.project(bootstrap=False)
+        previous = self.secrets.values["current"]
+        self.rotate("createSecret", CredentialHandoff=self.handoff(False))
+        snapshot = self.intent()["snapshot"]
+        self.assertEqual(rotation.openai_rotation.secret_digest(previous), snapshot["previous_secret_sha256"])
+        for field in ("api_key_id", "key_type", "project_id", "service_account_id"):
+            self.assertIsNone(snapshot["previous_" + field])
+        self.assertNotIn(previous["api_key"], json.dumps(self.intent()))
+        self.assertEqual(["TFCONFIG"], self.secrets.stages["config-v1"])
+        self.assertEqual(self.config, self.secrets.values["config-v1"])
+
+    def test_operator_handoff_rejects_reused_predecessor_plaintext_or_id(self):
+        self.old_project()
+        self.new_value = self.secrets.values["current"]["api_key"]
+        with self.assertRaisesRegex(ValueError, "non-independent"):
+            self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.assertNotIn(self.token, self.secrets.values)
+        self.assertIn("AWSCURRENT", self.secrets.stages["current"])
+
+    def test_operator_handoff_rejects_terraform_bootstrap_retirement(self):
+        self.project()
+        with self.assertRaisesRegex(ValueError, "non-bootstrap"):
+            self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.assertEqual([], self.secrets.put_calls)
+
+    def test_operator_handoff_rejects_reused_predecessor_id_even_when_preserving(self):
+        self.project(bootstrap=False)
+        self.new_id = self.secrets.values["current"]["api_key_id"]
+        with self.assertRaisesRegex(ValueError, "non-independent"):
+            self.rotate("createSecret", CredentialHandoff=self.handoff(False))
+        self.assertNotIn(self.token, self.secrets.values)
+
+    def test_operator_handoff_pending_identity_still_uses_replacement_configuration(self):
+        self.old_project()
+        self.rotate("createSecret", CredentialHandoff=self.handoff())
+        self.secrets.values[self.token]["service_account_id"] = "svc_old"
+        with self.assertRaisesRegex(ValueError, "pinned configuration"):
+            self.rotate("finishSecret")
+        self.assertEqual([], self.calls_for("DELETE"))
+        self.assertIn("AWSCURRENT", self.secrets.stages["current"])
+
+    def test_operator_handoff_cannot_override_ordinary_or_completed_intent(self):
+        self.rotate("createSecret")
+        with self.assertRaisesRegex(ValueError, "pinned rotation intent"):
+            self.rotate("createSecret", CredentialHandoff=self.handoff(False))
+        self.rotate("finishSecret")
+        with self.assertRaisesRegex(ValueError, "exact current predecessor"):
+            self.rotate("createSecret", CredentialHandoff=self.handoff(False))
+        self.assertEqual(1, len(self.calls_for("POST")))
+
     def test_first_admin_creation_promotes_without_deleting_bootstrap(self):
         for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
             self.rotate(step)

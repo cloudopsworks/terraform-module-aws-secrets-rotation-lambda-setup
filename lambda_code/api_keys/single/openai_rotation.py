@@ -36,6 +36,7 @@ SNAPSHOT_FIELDS = frozenset({
     "previous_service_account_id", "bootstrap_kind", "intent_version_id",
     "organization_id", "effective_ttl_seconds", "expiry_safety_seconds",
 })
+HANDOFF_SNAPSHOT_FIELDS = SNAPSHOT_FIELDS | {"previous_secret_sha256", "retire_previous_key"}
 RATE_PATTERN = re.compile(r"^rate\((\d+) (hour|hours|day|days)\)$")
 DURATION_PATTERN = re.compile(r"^(\d+)h$")
 STAGE_READBACK_ATTEMPTS = 3
@@ -216,9 +217,47 @@ def management_key(secrets, target_arn, target_key=None):
     )
 
 
+def secret_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def predecessor_config(previous):
+    # Never borrow identity or policy from the replacement's TFCONFIG.
+    return {"schema_version": 1, "key_type": previous["key_type"],
+            "name": previous["name"], "project_id": previous["project_id"],
+            "service_account_id": previous["service_account_id"],
+            "scopes": None, "role": None, "expires_in_seconds": None}
+
+
+def verify_predecessor(admin_key, previous, organization_id):
+    config = predecessor_config(previous)
+    details = openai_keys.get_key_if_present(
+        admin_key, config, previous["api_key_id"], organization_id)
+    if details is not None:
+        check_provider_key(details, {"config": config}, previous["api_key_id"],
+                           require_lifetime=False)
+    return config
+
+
+def check_handoff_event(event):
+    if "CredentialHandoff" not in event:
+        return None
+    handoff = event["CredentialHandoff"]
+    if (event["Step"] != "createSecret" or not isinstance(handoff, dict) or
+            set(handoff) != {"PreviousVersionId", "RetirePreviousKey"} or
+            not isinstance(handoff["PreviousVersionId"], str) or
+            not handoff["PreviousVersionId"] or
+            type(handoff["RetirePreviousKey"]) is not bool):
+        raise ValueError("CredentialHandoff requires an exact predecessor and retirement policy")
+    return handoff
+
+
 def check_snapshot(snapshot, arn, token):
-    if (not isinstance(snapshot, dict) or set(snapshot) != SNAPSHOT_FIELDS or
-            type(snapshot["schema_version"]) is not int or snapshot["schema_version"] != 1 or
+    version = snapshot.get("schema_version") if isinstance(snapshot, dict) else None
+    fields = HANDOFF_SNAPSHOT_FIELDS if version == 2 else SNAPSHOT_FIELDS
+    if (not isinstance(snapshot, dict) or set(snapshot) != fields or
+            type(version) is not int or version not in (1, 2) or
             snapshot["intent_version_id"] != intent_version(arn, token) or
             not isinstance(snapshot["config_version_id"], str) or not snapshot["config_version_id"] or
             not isinstance(snapshot["previous_version_id"], str) or not snapshot["previous_version_id"] or
@@ -233,6 +272,23 @@ def check_snapshot(snapshot, arn, token):
              (ttl != snapshot["config"]["expires_in_seconds"] or safety != 0))):
         raise ValueError("Rotation lifetime snapshot is invalid")
     kind, previous_id = snapshot["bootstrap_kind"], snapshot["previous_api_key_id"]
+    if version == 2:
+        if (kind != "operator_handoff" or
+                type(snapshot["retire_previous_key"]) is not bool or
+                not isinstance(snapshot["previous_secret_sha256"], str) or
+                re.fullmatch(r"[0-9a-f]{64}", snapshot["previous_secret_sha256"]) is None):
+            raise ValueError("Rotation handoff snapshot is invalid")
+        identity = ("previous_api_key_id", "previous_key_type", "previous_project_id",
+                    "previous_service_account_id")
+        if snapshot["retire_previous_key"]:
+            check_credential({"api_key": "identity-validation", "api_key_id": previous_id,
+                              "name": "identity-validation",
+                              "key_type": snapshot["previous_key_type"],
+                              "project_id": snapshot["previous_project_id"],
+                              "service_account_id": snapshot["previous_service_account_id"]})
+        elif any(snapshot[field] is not None for field in identity):
+            raise ValueError("Non-retiring handoff must not assert predecessor identity")
+        return
     if kind not in ("admin_new", "project_new", "project_existing", "existing"):
         raise ValueError("Rotation predecessor kind is invalid")
     if kind == "admin_new":
@@ -326,8 +382,21 @@ def rotate(event, secrets):
     if step not in ("createSecret", "setSecret", "testSecret", "finishSecret", "reconcileOrphan"):
         raise ValueError("Unsupported rotation step")
     LOG.info("openai_rotation step=%s status=started", step)
+    handoff = check_handoff_event(event)
     metadata = (secret_metadata(secrets, arn) if step == "reconcileOrphan"
                 else rotation_metadata(secrets, arn, token))
+    if handoff is not None:
+        existing = read_intent(secrets, arn)
+        if existing is not None:
+            snapshot = existing["snapshot"]
+            if (existing["token"] != token or snapshot["bootstrap_kind"] != "operator_handoff" or
+                    snapshot["previous_version_id"] != handoff["PreviousVersionId"] or
+                    snapshot["retire_previous_key"] != handoff["RetirePreviousKey"]):
+                raise ValueError("CredentialHandoff differs from pinned rotation intent")
+        elif ("AWSCURRENT" in metadata["VersionIdsToStages"].get(token, ()) or
+              "AWSCURRENT" not in metadata["VersionIdsToStages"].get(
+                  handoff["PreviousVersionId"], ())):
+            raise ValueError("CredentialHandoff must pin the exact current predecessor")
     correlation = hashlib.sha256(f"{metadata['ARN']}:{token}".encode()).hexdigest()
     LOG.info("openai_rotation invocation correlation=%s", correlation)
     if step == "reconcileOrphan":
@@ -367,7 +436,21 @@ def create_secret(secrets, metadata, event):
     config, config_version_id = read_config(secrets, arn)
     current, previous_version_id = read_json(secrets, arn, VersionStage="AWSCURRENT")
     stages = metadata["VersionIdsToStages"].get(previous_version_id, ())
-    kind = check_credential(current, bootstrap_allowed=True, stages=stages)
+    handoff = check_handoff_event(event)
+    if handoff is not None:
+        if previous_version_id != handoff["PreviousVersionId"]:
+            raise ValueError("CredentialHandoff predecessor changed")
+        if handoff["RetirePreviousKey"]:
+            if "TFBOOTSTRAP" in stages:
+                raise ValueError("CredentialHandoff retirement requires a non-bootstrap predecessor")
+            check_credential(current)
+            previous_id, previous_type = current["api_key_id"], current["key_type"]
+            previous_project, previous_account = current["project_id"], current["service_account_id"]
+        else:
+            previous_id = previous_type = previous_project = previous_account = None
+        kind = "operator_handoff"
+    else:
+        kind = check_credential(current, bootstrap_allowed=True, stages=stages)
     if kind in ("admin_new", "project_new"):
         if (config["key_type"] != ("admin" if kind == "admin_new" else "project") or
                 (kind == "project_new" and any(current[field] != config[field]
@@ -377,7 +460,7 @@ def create_secret(secrets, metadata, event):
         previous_type = config["key_type"]
         previous_project = config["project_id"]
         previous_account = config["service_account_id"]
-    else:
+    elif kind != "operator_handoff":
         if (current["key_type"] != config["key_type"] or
                 current["project_id"] != config["project_id"] or
                 current["service_account_id"] != config["service_account_id"]):
@@ -389,6 +472,8 @@ def create_secret(secrets, metadata, event):
     admin_key, organization_id = management_key(secrets, arn, current.get("api_key"))
     LOG.info("openai_rotation action=verify_management_key")
     openai_keys.validate_key(admin_key, {"key_type": "admin"}, organization_id)
+    if handoff is not None and handoff["RetirePreviousKey"]:
+        verify_predecessor(admin_key, current, organization_id)
     if config["key_type"] == "project":
         LOG.info("openai_rotation action=verify_service_account")
         service_account = openai_keys.get_service_account(admin_key, config, organization_id)
@@ -404,6 +489,10 @@ def create_secret(secrets, metadata, event):
         "organization_id": organization_id,
         "effective_ttl_seconds": ttl, "expiry_safety_seconds": safety,
     }
+    if handoff is not None:
+        snapshot.update({"schema_version": 2, "previous_secret_sha256": secret_digest(current),
+                         "retire_previous_key": handoff["RetirePreviousKey"]})
+    check_snapshot(snapshot, arn, token)
     intent = {
         "intent_version_id": snapshot["intent_version_id"], "secret_arn": arn,
         "token": token, "snapshot": snapshot, "owner_nonce": uuid.uuid4().hex,
@@ -421,7 +510,7 @@ def create_secret(secrets, metadata, event):
     LOG.info("openai_rotation action=issue_replacement")
     key, key_id = openai_keys.create_key(admin_key, {**config, "expires_in_seconds": ttl}, organization_id)
     LOG.info("openai_rotation issued secret_id=%s version_id=%s key_id=%s", arn, token, key_id)
-    if key == admin_key or key_id == previous_id:
+    if key in (admin_key, current.get("api_key")) or key_id in (previous_id, current.get("api_key_id")):
         raise ValueError("OpenAI returned a non-independent replacement key")
     pending = {
         "key_type": config["key_type"], "api_key": key, "api_key_id": key_id,
@@ -499,14 +588,24 @@ def finish_secret(secrets, metadata, token):
     previous_id = snapshot["previous_version_id"]
     previous, _ = read_json(secrets, arn, VersionId=previous_id)
     previous_stages = metadata["VersionIdsToStages"].get(previous_id, ())
-    kind = check_credential(previous, bootstrap_allowed=True, stages=previous_stages)
-    if (kind != snapshot["bootstrap_kind"] or previous.get("api_key_id") != (
-            BOOTSTRAP_ID if kind in ("admin_new", "project_new") else snapshot["previous_api_key_id"]) or
-            (kind != "admin_new" and (
-                previous["key_type"] != snapshot["previous_key_type"] or
-                previous["project_id"] != snapshot["previous_project_id"] or
-                previous["service_account_id"] != snapshot["previous_service_account_id"]))):
-        raise ValueError("Rotation predecessor differs from saved snapshot")
+    if snapshot["bootstrap_kind"] == "operator_handoff":
+        kind = "operator_handoff"
+        if secret_digest(previous) != snapshot["previous_secret_sha256"]:
+            raise ValueError("Rotation handoff predecessor digest changed")
+        if snapshot["retire_previous_key"]:
+            check_credential(previous)
+            if any(previous[field] != snapshot["previous_" + field] for field in (
+                    "api_key_id", "key_type", "project_id", "service_account_id")):
+                raise ValueError("Rotation handoff predecessor identity changed")
+    else:
+        kind = check_credential(previous, bootstrap_allowed=True, stages=previous_stages)
+        if (kind != snapshot["bootstrap_kind"] or previous.get("api_key_id") != (
+                BOOTSTRAP_ID if kind in ("admin_new", "project_new") else snapshot["previous_api_key_id"]) or
+                (kind != "admin_new" and (
+                    previous["key_type"] != snapshot["previous_key_type"] or
+                    previous["project_id"] != snapshot["previous_project_id"] or
+                    previous["service_account_id"] != snapshot["previous_service_account_id"]))):
+            raise ValueError("Rotation predecessor differs from saved snapshot")
     if not already_current:
         current, current_version = read_json(secrets, arn, VersionStage="AWSCURRENT")
         if current_version != previous_id or current != previous:
@@ -525,10 +624,14 @@ def finish_secret(secrets, metadata, token):
     current, current_version = read_json(secrets, arn, VersionStage="AWSCURRENT")
     if current_version != token or current != pending:
         raise ValueError("Promoted credential differs from saved pending version")
-    if kind not in ("admin_new", "project_new"):
+    if kind == "operator_handoff" and not snapshot["retire_previous_key"]:
+        LOG.warning("openai_rotation action=predecessor_retirement_deferred")
+    elif kind not in ("admin_new", "project_new"):
         admin_key, organization_id = management_key(secrets, arn, previous["api_key"])
         LOG.info("openai_rotation action=retire_predecessor")
-        openai_keys.delete_key(admin_key, snapshot["config"], snapshot["previous_api_key_id"], organization_id)
+        retirement_config = (verify_predecessor(admin_key, previous, organization_id)
+                             if kind == "operator_handoff" else snapshot["config"])
+        openai_keys.delete_key(admin_key, retirement_config, snapshot["previous_api_key_id"], organization_id)
         LOG.info("openai_rotation retired secret_id=%s version_id=%s key_id=%s", arn, previous_id, snapshot["previous_api_key_id"])
     else:
         LOG.info("openai_rotation action=no_predecessor_to_retire")
