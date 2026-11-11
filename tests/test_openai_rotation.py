@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import copy
+import hashlib
 import json
 import os
 import unittest
@@ -169,6 +170,8 @@ class OpenAIRotationTests(unittest.TestCase):
                 messages = [record.getMessage() for record in logs.records]
                 self.assertEqual(f"openai_rotation step={step} status=started", messages[0])
                 self.assertEqual(f"openai_rotation step={step} status=completed", messages[-1])
+                correlation = hashlib.sha256(f"{self.arn}:{self.token}".encode()).hexdigest()
+                self.assertIn(f"openai_rotation invocation correlation={correlation}", messages)
                 positions = [messages.index(f"openai_rotation action={action}") for action in actions]
                 self.assertEqual(sorted(positions), positions)
                 for credential in ("management-credential", "sk-bootstrap", self.new_value):
@@ -480,11 +483,11 @@ class OpenAIRotationTests(unittest.TestCase):
                 self.assertLogs(rotation.openai_rotation.LOG, level="INFO") as phases:
             with self.assertRaisesRegex(RuntimeError, "^API key rotation failed$"):
                 rotation.lambda_handler(event, None)
-        self.assertEqual(
-            ["API key rotation failed: provider=openai step=createSecret "
-             "error_type=OpenAIManagementSecretError"],
-            [record.getMessage() for record in logs.records],
-        )
+        failures = [record.getMessage() for record in logs.records]
+        self.assertEqual("API key rotation failed: provider=openai step=createSecret "
+                         "error_type=OpenAIManagementSecretError", failures[0])
+        self.assertRegex(failures[1], r"^rotation_failure source=openai_rotation\.py line=[1-9][0-9]*$")
+        self.assertEqual(2, len(failures))
         messages = [record.getMessage() for record in phases.records]
         self.assertEqual("openai_rotation action=reject_management_key reason=organization_env_invalid",
                          messages[-1])
@@ -492,6 +495,17 @@ class OpenAIRotationTests(unittest.TestCase):
         provider.assert_not_called()
         self.assertEqual([], self.secrets.put_calls)
         self.assertIn("AWSCURRENT", self.secrets.stages["current"])
+
+    def test_dispatcher_failure_location_does_not_log_exception_text(self):
+        event = {"SecretId": self.arn, "ClientRequestToken": self.token, "Step": "createSecret"}
+        with patch.object(rotation.boto3, "client", return_value=self.secrets), \
+                patch.object(rotation, "rotate", side_effect=ValueError("private-credential-payload")), \
+                self.assertLogs(rotation.LOG, level="ERROR") as logs:
+            with self.assertRaisesRegex(RuntimeError, "^API key rotation failed$"):
+                rotation.lambda_handler(event, None)
+        failures = [record.getMessage() for record in logs.records]
+        self.assertRegex(failures[-1], r"^rotation_failure source=lambda_function\.py line=[1-9][0-9]*$")
+        self.assertNotIn("private-credential-payload", "\n".join(failures))
 
     def test_invalid_configured_organization_cannot_fall_back_to_secret(self):
         for value in ("", " ", "org_123\n"):

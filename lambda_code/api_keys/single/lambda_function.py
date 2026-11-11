@@ -32,6 +32,15 @@ def lambda_handler(event, context):
         ) else "unknown"
         LOG.error("API key rotation failed: provider=%s step=%s error_type=%s",
                   provider, step, type(exc).__name__)
+        source, line = "external", 0
+        trace = exc.__traceback__
+        while trace is not None:
+            filename = os.path.basename(trace.tb_frame.f_code.co_filename)
+            if filename in ("lambda_function.py", "openai_rotation.py", "openai_keys.py",
+                            "openrouter_rotation.py", "openrouter_keys.py", "http_api.py"):
+                source, line = filename, trace.tb_lineno
+            trace = trace.tb_next
+        LOG.error("rotation_failure source=%s line=%d", source, line)
         raise RuntimeError("API key rotation failed") from None
 
 

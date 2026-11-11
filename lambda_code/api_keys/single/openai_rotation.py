@@ -319,10 +319,13 @@ def rotate(event, secrets):
     if step not in ("createSecret", "setSecret", "testSecret", "finishSecret", "reconcileOrphan"):
         raise ValueError("Unsupported rotation step")
     LOG.info("openai_rotation step=%s status=started", step)
+    metadata = (secret_metadata(secrets, arn) if step == "reconcileOrphan"
+                else rotation_metadata(secrets, arn, token))
+    correlation = hashlib.sha256(f"{metadata['ARN']}:{token}".encode()).hexdigest()
+    LOG.info("openai_rotation invocation correlation=%s", correlation)
     if step == "reconcileOrphan":
-        reconcile_orphan(secrets, secret_metadata(secrets, arn), event)
+        reconcile_orphan(secrets, metadata, event)
     else:
-        metadata = rotation_metadata(secrets, arn, token)
         if "AWSCURRENT" in metadata["VersionIdsToStages"].get(token, ()) and step != "finishSecret":
             LOG.info("openai_rotation action=skip_already_current")
         elif step == "createSecret":
