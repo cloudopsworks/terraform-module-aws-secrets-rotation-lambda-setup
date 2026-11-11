@@ -10,7 +10,7 @@ settings:
   memory_size: 128 # (Optional) Lambda memory size in MB. Default: 128.
   password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
   # For type: openai or openrouter, supply a pre-existing AWS Secrets Manager management secret.
-  # OpenAI requires JSON {"api_key":"<admin management key>","organization_id":"<organization ID>"}.
+  # OpenAI accepts JSON {"api_key":"<admin management key>"}; organization_id is optional and must match the configured ID if present.
   # Use exactly one credential field: api_key, admin_api_key, or management_api_key.
   # OpenRouter requires JSON {"api_key":"<management key>"}. This module never manages either secret.
   # Never put the management key value in Terraform inputs.
@@ -30,7 +30,7 @@ settings:
   # management_api_key: # (Required for openai/openrouter) Pre-existing management key secret.
   #   secret_arn: app/management # (Required) Existing secret name or ARN. The module resolves its ARN and KMS key automatically.
   # openai: # (Required when type is openai) Organization binding for the external admin key.
-  #   organization_id: org_123 # (Required) Organization ID; must match management secret JSON.
+  #   organization_id: org_123 # (Required) Authoritative organization ID; must match the secret only if it declares an organization_id.
   # openrouter: # (Optional when type is openrouter) Legacy inputs ignored by the OpenRouter Lambda; TFCONFIG is authoritative.
   #   limit: 10.0 # (Optional) Legacy setting ignored; resolved limit comes from TFCONFIG.
   #   limit_reset: daily # (Optional) Legacy setting ignored; resolved reset interval comes from TFCONFIG.

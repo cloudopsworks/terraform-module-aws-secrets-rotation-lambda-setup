@@ -41,7 +41,7 @@ DURATION_PATTERN = re.compile(r"^(\d+)h$")
 
 
 class OpenAIManagementSecretError(ValueError):
-    """The configured management secret does not bind an independent key to the organization."""
+    """The management credential or configured organization is invalid."""
 
 
 def utcnow():
@@ -194,14 +194,15 @@ def management_key(secrets, target_arn, target_key=None):
     LOG.info("openai_rotation action=load_management_key")
     value = secrets.get_secret_value(SecretId=management_arn)
     data = json.loads(value["SecretString"])
-    organization_id = os.environ["OPENAI_ORGANIZATION_ID"]
+    organization_id = os.environ.get("OPENAI_ORGANIZATION_ID")
     fields = MANAGEMENT_KEY_FIELDS.intersection(data) if isinstance(data, dict) else ()
     key = data[next(iter(fields))] if len(fields) == 1 else None
     if not isinstance(key, str) or not key.strip():
         reason = "invalid_credential_field"
-    elif data.get("organization_id") is None:
-        reason = "organization_missing"
-    elif not organization_id or data["organization_id"] != organization_id:
+    elif (not organization_id or not organization_id.strip()
+          or "\r" in organization_id or "\n" in organization_id):
+        reason = "organization_env_invalid"
+    elif "organization_id" in data and data["organization_id"] != organization_id:
         reason = "organization_mismatch"
     elif key == target_key:
         reason = "matches_target_key"

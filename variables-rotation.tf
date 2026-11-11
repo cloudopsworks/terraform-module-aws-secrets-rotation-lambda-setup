@@ -27,7 +27,7 @@
 #   allowed_secrets:              # (Optional) Secrets Manager secret ARNs the rotation function may read and update.
 #     - arn:aws:secretsmanager:<region>:<account>:secret:<name>
 #   # For type: openai or openrouter, supply a pre-existing AWS Secrets Manager management secret.
-#   # OpenAI requires JSON {"api_key":"<admin management key>","organization_id":"<organization ID>"}.
+#   # OpenAI accepts JSON {"api_key":"<admin management key>"}; organization_id is optional and must match the configured ID if present.
 #   # OpenRouter requires JSON {"api_key":"<management key>"}. This module never manages either secret.
 #   # Never put the management key value in Terraform inputs.
 #   # Seed the external target secret separately. Both API-key providers require
@@ -46,7 +46,7 @@
 #   # management_api_key: # (Required for openai/openrouter) Pre-existing management key secret.
 #   #   secret_arn: app/management # (Required) Existing secret name or ARN. The module resolves its ARN and KMS key automatically.
 #   # openai: # (Required when type is openai) Organization binding for the external admin key.
-#   #   organization_id: org_123 # (Required) Organization ID; must match management secret JSON.
+#   #   organization_id: org_123 # (Required) Authoritative organization ID; must match the secret only if it declares an organization_id.
 #   # openrouter: # (Optional when type is openrouter) Legacy inputs ignored by the OpenRouter Lambda; TFCONFIG is authoritative.
 #   #   limit: 10.0 # (Optional) Legacy setting ignored; resolved limit comes from TFCONFIG.
 #   #   limit_reset: daily # (Optional) Legacy setting ignored; resolved reset interval comes from TFCONFIG.

@@ -433,24 +433,29 @@ class OpenAIRotationTests(unittest.TestCase):
             self.rotate("createSecret")
         self.assertEqual([], self.calls_for("POST"))
 
-    def test_management_organization_drift_fails_before_create(self):
-        self.secrets.management = json.dumps({
-            "admin_api_key": "management-credential", "organization_id": "org_other"})
-        with self.assertRaisesRegex(ValueError, "organization-bound"):
-            self.rotate("createSecret")
+    def test_supplied_management_organization_must_match_before_create(self):
+        for organization_id in ("org_other", "", None, 42):
+            with self.subTest(organization_id=organization_id):
+                self.secrets.management = json.dumps({
+                    "admin_api_key": "management-credential", "organization_id": organization_id,
+                })
+                with self.assertRaises(rotation.openai_rotation.OpenAIManagementSecretError), \
+                        self.assertLogs(rotation.openai_rotation.LOG, level="WARNING") as logs:
+                    self.rotate("createSecret")
+                self.assertEqual("openai_rotation action=reject_management_key reason=organization_mismatch",
+                                 logs.records[-1].getMessage())
         self.assertEqual([], self.calls)
         self.assertEqual([], self.secrets.put_calls)
 
     def test_management_key_accepts_each_supported_field(self):
         for field in ("api_key", "admin_api_key", "management_api_key"):
-            with self.subTest(field=field):
-                self.secrets.management = json.dumps({
-                    field: "management-credential", "organization_id": "org_123",
-                })
-                self.assertEqual(
-                    ("management-credential", "org_123"),
-                    rotation.openai_rotation.management_key(self.secrets, self.arn),
-                )
+            for metadata in ({}, {"organization_id": "org_123"}):
+                with self.subTest(field=field, metadata=metadata):
+                    self.secrets.management = json.dumps({field: "management-credential", **metadata})
+                    self.assertEqual(
+                        ("management-credential", "org_123"),
+                        rotation.openai_rotation.management_key(self.secrets, self.arn),
+                    )
 
     def test_management_key_rejects_invalid_or_multiple_fields_before_intent(self):
         for fields in ({}, {"management_api_key": ""}, {"admin_api_key": 42},
@@ -462,10 +467,11 @@ class OpenAIRotationTests(unittest.TestCase):
         self.assertEqual([], self.calls)
         self.assertEqual([], self.secrets.put_calls)
 
-    def test_legacy_management_secret_fails_with_safe_diagnostic_before_intent(self):
+    def test_missing_configured_organization_fails_with_safe_diagnostic_before_intent(self):
         self.project(role="member")
         self.secrets.rotation_rules = {"AutomaticallyAfterDays": 30}
         self.secrets.management = json.dumps({"api_key": "management-credential"})
+        del os.environ["OPENAI_ORGANIZATION_ID"]
         event = {"SecretId": self.arn, "ClientRequestToken": self.token,
                  "Step": "createSecret"}
         with patch.object(rotation.boto3, "client", return_value=self.secrets), \
@@ -480,12 +486,32 @@ class OpenAIRotationTests(unittest.TestCase):
             [record.getMessage() for record in logs.records],
         )
         messages = [record.getMessage() for record in phases.records]
-        self.assertEqual("openai_rotation action=reject_management_key reason=organization_missing",
+        self.assertEqual("openai_rotation action=reject_management_key reason=organization_env_invalid",
                          messages[-1])
         self.assertNotIn("management-credential", "\n".join(messages))
         provider.assert_not_called()
         self.assertEqual([], self.secrets.put_calls)
         self.assertIn("AWSCURRENT", self.secrets.stages["current"])
+
+    def test_invalid_configured_organization_cannot_fall_back_to_secret(self):
+        for value in ("", " ", "org_123\n"):
+            with self.subTest(value=value), patch.dict(os.environ, {"OPENAI_ORGANIZATION_ID": value}):
+                with self.assertRaises(rotation.openai_rotation.OpenAIManagementSecretError):
+                    self.rotate("createSecret")
+        self.assertEqual([], self.calls)
+        self.assertEqual([], self.secrets.put_calls)
+
+    def test_key_only_management_secret_rotates_existing_project_key_with_configured_organization(self):
+        self.project(bootstrap=False, role="member")
+        self.provider_role = "member"
+        self.secrets.management = json.dumps({"api_key": "management-credential"})
+        for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
+            self.rotate(step)
+        self.assertEqual({"org_123"}, {call[4]["organization_id"] for call in self.calls})
+        self.assertEqual("management-credential", self.calls_for("POST")[0][2])
+        self.assertEqual("key_bootstrap", self.calls_for("DELETE")[0][1].rsplit("/", 1)[-1])
+        self.assertIn("AWSCURRENT", self.secrets.stages[self.token])
+        self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
 
     def test_management_key_is_independent_and_organization_bound_on_create(self):
         self.rotate("createSecret")
