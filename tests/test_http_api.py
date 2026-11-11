@@ -1,6 +1,5 @@
 """Credential-safe diagnostics for upstream API failures."""
 
-from contextlib import nullcontext
 import io
 import unittest
 from unittest.mock import MagicMock, patch
@@ -35,26 +34,26 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(["http_api action=request_failed reason=transport_error"],
                          [record.getMessage() for record in logs.records])
 
-    def test_response_organization_check_preserves_optional_header_contract(self):
-        for response_org in (None, "org_123", "org_other"):
+    def test_request_organization_is_authoritative_not_response_metadata(self):
+        for response_org in (None, "org_123", "organization-display-name", "org_other"):
             with self.subTest(response_org=response_org):
                 response = MagicMock()
                 response.headers.get.return_value = response_org
                 response.read.return_value = b"{}"
                 response.__enter__.return_value = response
-                context = (self.assertLogs(http_api.__name__, level="WARNING")
-                           if response_org == "org_other" else nullcontext())
-                with patch.object(http_api.request, "urlopen", return_value=response) as urlopen, context as logs:
-                    if response_org == "org_other":
-                        with self.assertRaisesRegex(RuntimeError, "different organization"):
-                            http_api.call_api("GET", "https://example.com", "private-credential",
-                                              organization_id="org_123")
-                        self.assertEqual(["http_api action=request_failed reason=organization_mismatch"],
-                                         [record.getMessage() for record in logs.records])
-                    else:
-                        self.assertEqual({}, http_api.call_api(
-                            "GET", "https://example.com", "private-credential", organization_id="org_123"))
+                with patch.object(http_api.request, "urlopen", return_value=response) as urlopen, \
+                        self.assertNoLogs(http_api.__name__, level="WARNING"):
+                    self.assertEqual({}, http_api.call_api(
+                        "GET", "https://example.com", "private-credential", organization_id="org_123"))
                     self.assertEqual("org_123", urlopen.call_args.args[0].get_header("Openai-organization"))
+
+    def test_invalid_request_organization_fails_before_network_request(self):
+        with patch.object(http_api.request, "urlopen") as urlopen:
+            for organization_id in ("", "org_123\n", "org_123\r", 42):
+                with self.subTest(organization_id=organization_id), self.assertRaises(ValueError):
+                    http_api.call_api("GET", "https://example.com", "private-credential",
+                                      organization_id=organization_id)
+            urlopen.assert_not_called()
 
     def test_allowed_not_found_stays_idempotent_without_failure_log(self):
         failure = HTTPError("https://example.com/private-id", 404, "private-message", {}, io.BytesIO())

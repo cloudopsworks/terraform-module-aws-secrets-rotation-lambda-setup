@@ -24,13 +24,8 @@ def call_api(method, url, key, payload=None, *, allow_not_found=False,
     req = request.Request(url, data=body, headers=headers, method=method)
     try:
         with request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
-            response_headers = getattr(response, "headers", None)
-            response_org = (response_headers.get("openai-organization")
-                            if organization_id is not None and response_headers is not None
-                            else None)
-            if response_org and response_org != organization_id:
-                LOG.warning("http_api action=request_failed reason=organization_mismatch")
-                raise RuntimeError("OpenAI response belongs to a different organization")
+            # The response organization header is not a documented canonical-ID
+            # echo. Scope requests with the configured ID and trust API authorization.
             content = response.read()
     except error.HTTPError as exc:
         if allow_not_found and exc.code == 404:
