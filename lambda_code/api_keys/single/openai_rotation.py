@@ -38,6 +38,8 @@ SNAPSHOT_FIELDS = frozenset({
 })
 RATE_PATTERN = re.compile(r"^rate\((\d+) (hour|hours|day|days)\)$")
 DURATION_PATTERN = re.compile(r"^(\d+)h$")
+STAGE_READBACK_ATTEMPTS = 3
+STAGE_READBACK_DELAY_SECONDS = 1
 
 
 class OpenAIManagementSecretError(ValueError):
@@ -301,9 +303,14 @@ def check_provider_key(details, snapshot, key_id, *, require_lifetime=True):
 
 def clear_completed_intent(secrets, arn, token):
     intent = token_intent(secrets, arn, token)
-    stages = secrets.describe_secret(SecretId=arn)["VersionIdsToStages"]
-    if "AWSCURRENT" not in stages.get(token, ()) or "AWSPENDING" in stages.get(token, ()):
-        raise RuntimeError("Rotation credential has not finished")
+    for attempt in range(STAGE_READBACK_ATTEMPTS):
+        stages = secrets.describe_secret(SecretId=arn)["VersionIdsToStages"]
+        if "AWSCURRENT" in stages.get(token, ()) and "AWSPENDING" not in stages.get(token, ()):
+            break
+        if attempt == STAGE_READBACK_ATTEMPTS - 1:
+            raise RuntimeError("Rotation credential has not finished")
+        LOG.info("openai_rotation action=wait_for_stage_readback")
+        time.sleep(STAGE_READBACK_DELAY_SECONDS)
     credential, _ = read_json(secrets, arn, VersionId=token, VersionStage="AWSCURRENT")
     check_pending(credential, intent["snapshot"])
     secrets.update_secret_version_stage(

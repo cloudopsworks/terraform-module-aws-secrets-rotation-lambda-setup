@@ -177,6 +177,47 @@ class OpenAIRotationTests(unittest.TestCase):
                 for credential in ("management-credential", "sk-bootstrap", self.new_value):
                     self.assertNotIn(credential, "\n".join(messages))
 
+    def test_intent_cleanup_retries_stale_pending_stage_reads_without_other_writes(self):
+        self.rotate("createSecret")
+        self.secrets.stages[self.token] = ["AWSCURRENT"]
+        self.secrets.stages["current"] = ["AWSPREVIOUS"]
+        ready = self.secrets.describe_secret(SecretId=self.arn)
+        stale = copy.deepcopy(ready)
+        stale["VersionIdsToStages"][self.token].append("AWSPENDING")
+        with patch.object(self.secrets, "describe_secret", side_effect=[stale, stale, ready]) as describe, \
+                patch.object(rotation.openai_rotation.time, "sleep") as sleep:
+            rotation.openai_rotation.clear_completed_intent(self.secrets, self.arn, self.token)
+        self.assertEqual(3, describe.call_count)
+        self.assertEqual([((1,), {}), ((1,), {})], sleep.call_args_list)
+        self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+        self.assertEqual([], self.calls_for("DELETE"))
+        self.assertEqual(1, len(self.calls_for("POST")))
+
+    def test_intent_cleanup_preserves_intent_when_stage_readback_never_converges(self):
+        self.rotate("createSecret")
+        self.secrets.stages[self.token] = ["AWSCURRENT"]
+        self.secrets.stages["current"] = ["AWSPREVIOUS"]
+        stale = copy.deepcopy(self.secrets.describe_secret(SecretId=self.arn))
+        stale["VersionIdsToStages"][self.token].append("AWSPENDING")
+        with patch.object(self.secrets, "describe_secret", return_value=stale) as describe, \
+                patch.object(rotation.openai_rotation.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "has not finished"):
+                rotation.openai_rotation.clear_completed_intent(self.secrets, self.arn, self.token)
+        self.assertEqual(3, describe.call_count)
+        self.assertEqual(2, sleep.call_count)
+        self.assertTrue(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+        self.assertEqual([], self.secrets.stage_updates)
+
+    def test_intent_cleanup_still_rejects_mismatched_current_credential(self):
+        self.rotate("createSecret")
+        self.secrets.stages[self.token] = ["AWSCURRENT"]
+        self.secrets.stages["current"] = ["AWSPREVIOUS"]
+        self.secrets.values[self.token]["name"] = "unexpected-name"
+        with self.assertRaisesRegex(ValueError, "differs from pinned configuration"):
+            rotation.openai_rotation.clear_completed_intent(self.secrets, self.arn, self.token)
+        self.assertTrue(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+        self.assertEqual([], self.secrets.stage_updates)
+
     def test_keyless_project_bootstrap_creates_first_key_without_retirement(self):
         self.keyless_project(scopes=["api.model.read"])
         for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
