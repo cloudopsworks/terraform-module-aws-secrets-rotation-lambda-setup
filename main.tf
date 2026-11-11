@@ -1,5 +1,5 @@
 ##
-# (c) 2021-2025
+# (c) 2021-2026
 #     Cloud Ops Works LLC - https://cloudops.works/
 #     Find us on:
 #       GitHub: https://github.com/cloudopsworks
@@ -8,9 +8,12 @@
 #
 
 locals {
-  multi_user          = try(var.settings.multi_user, false)
-  function_name       = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
-  function_name_short = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
+  api_key_rotation      = contains(["openai", "openrouter"], var.settings.type)
+  management_secret_id  = try(trimspace(var.settings.management_api_key.secret_arn), null)
+  management_secret_arn = local.api_key_rotation ? data.aws_secretsmanager_secret.management_api_key[0].arn : null
+  multi_user            = try(var.settings.multi_user, false)
+  function_name         = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
+  function_name_short   = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
   pip_map = {
     postgres     = "\"psycopg[binary]\" typing_extensions"
     mysql        = "PyMySQL"
@@ -20,21 +23,27 @@ locals {
     mongodbatlas = "[golang]"
     oracle       = "python-oracledb"
     db2          = "python-ibmdb"
+    openai       = "[stdlib]"
+    openrouter   = "[stdlib]"
   }
-  variables = concat(try(var.settings.environment.variables, []),
-    [
-      {
-        name  = "SECRETS_MANAGER_ENDPOINT"
-        value = "https://secretsmanager.${data.aws_region.current.region}.amazonaws.com"
-      },
-    ],
-    try(var.settings.password_length, -1) >= 24 ? [
-      {
-        name  = "PASSWORD_LENGTH"
-        value = tostring(var.settings.password_length)
-    }] : []
+  openrouter_key_options = {
+    for key, value in try(var.settings.openrouter, {}) : key => value
+    if key == "expires_at"
+  }
+  variables = merge(
+    { for item in try(var.settings.environment.variables, []) : item.name => item.value },
+    { SECRETS_MANAGER_ENDPOINT = "https://secretsmanager.${data.aws_region.current.region}.amazonaws.com" },
+    !local.api_key_rotation && try(var.settings.password_length, -1) >= 24 ? { PASSWORD_LENGTH = tostring(var.settings.password_length) } : {},
+    local.api_key_rotation ? merge({
+      API_PROVIDER          = var.settings.type
+      MANAGEMENT_SECRET_ARN = local.management_secret_arn
+      }, var.settings.type == "openai" ? {
+      OPENAI_ORGANIZATION_ID = try(var.settings.openai.organization_id, "")
+      } : {
+      OPENROUTER_KEY_OPTIONS_JSON = jsonencode(local.openrouter_key_options)
+    }) : {}
   )
-  source_root = "lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
+  source_root = local.api_key_rotation ? "lambda_code/api_keys/single" : "lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
   source_dir  = "${path.module}/${local.source_root}"
   files_base64sha256 = base64encode(sha256(join("", [
     for item in fileset(path.module, "${local.source_root}/**/*") : filesha256(item)
@@ -48,7 +57,7 @@ moved {
 }
 
 resource "terraform_data" "function_pip" {
-  count = local.pip_map[var.settings.type] != "[golang]" ? 1 : 0
+  count = !contains(["[golang]", "[stdlib]"], local.pip_map[var.settings.type]) ? 1 : 0
   triggers_replace = {
     always_run = tostring(timestamp())
   }
@@ -102,6 +111,20 @@ resource "aws_lambda_function" "this" {
   memory_size      = try(var.settings.memory_size, 128)
   timeout          = try(var.settings.timeout, 60)
   publish          = true
+  lifecycle {
+    precondition {
+      condition     = !local.api_key_rotation || !local.multi_user
+      error_message = "API key rotation supports only the single-user strategy; set settings.multi_user to false."
+    }
+    precondition {
+      condition     = var.settings.type != "openai" || try(length(trimspace(var.settings.openai.organization_id)) > 0, false)
+      error_message = "OpenAI rotation requires settings.openai.organization_id."
+    }
+    precondition {
+      condition     = !local.api_key_rotation || length(try(var.settings.allowed_secrets, [])) > 0
+      error_message = "API key rotation requires the target secret ARN in settings.allowed_secrets."
+    }
+  }
   dynamic "vpc_config" {
     for_each = try(var.vpc.enabled, false) ? [1] : []
     content {
@@ -110,10 +133,7 @@ resource "aws_lambda_function" "this" {
     }
   }
   environment {
-    variables = {
-      for item in local.variables :
-      item.name => item.value
-    }
+    variables = local.variables
   }
   logging_config {
     application_log_level = try(var.settings.logging.application_log_level, null)
@@ -124,6 +144,9 @@ resource "aws_lambda_function" "this" {
   tags = local.all_tags
   depends_on = [
     aws_cloudwatch_log_group.logs,
+    aws_iam_role_policy.allowed_secrets,
+    aws_iam_role_policy.management_api_key,
+    aws_iam_role_policy.management_api_key_kms,
     terraform_data.archive_file
   ]
 }

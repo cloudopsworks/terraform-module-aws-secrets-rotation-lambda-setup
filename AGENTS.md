@@ -20,7 +20,7 @@ This document provides instructions for AI Agents working with the implementatio
 
 ## Implementation Repository Guidelines
 
-- **Use the `tronador` CLI**: All commands should be run from the root of the repository. The `Makefile` is deprecated for `repos/*`, `fmt`, `lint` and `readme` — use the CLI for those. Only the operations the CLI does not implement remain `make`-based (see [Tronador CLI Coverage](#tronador-cli-coverage)).
+- **Use the `tronador` CLI**: All commands should be run from the root of the repository. The `Makefile` is deprecated for `repos/*`, `fmt`, `lint`, README, and Git-flow/version operations, including destructive purge (see [Tronador CLI Coverage](#tronador-cli-coverage)).
 - **Avoid modifying**: Avoid modifying the following: 
   - Any files originating from the cloud provider boilerplate (e.g., `aws.tf`, `google.tf`, `azurerm.tf`, `variables-azurerm.tf`, `locals.tf`) in `.cloudopsworks/boilerplate/` (except `versions.tf`).
   - Anything under `.cloudopsworks/boilerplate/`
@@ -30,11 +30,11 @@ This document provides instructions for AI Agents working with the implementatio
   - The subname must be no more than 12 chars (e.g., `variables-vpc.tf`).
 - **Initialization**:
   - This template must be initialized on the target cloud provider using the `tronador` CLI.
-  - For AWS: `tronador project init aws`
-  - For GCP: `tronador project init gcp`
-  - For Azure: `tronador project init azurerm`
-  - For MongoDB Atlas: `tronador project init mongodb`
-  - For Github: `tronador project init github`
+  - For AWS: `tronador project init aws --allow-network`
+  - For GCP: `tronador project init gcp --allow-network`
+  - For Azure: `tronador project init azurerm --allow-network`
+  - For MongoDB Atlas: `tronador project init mongodb --allow-network`
+  - For Github: `tronador project init github --allow-network`
   - The initialization process for each cloud will copy its boilerplate files to the root module.
   - If a `versions.tf` file exists (e.g., from `.cloudopsworks/boilerplate/aws`, `gcp`, `azurerm`, or any other supported provider), the module is already initialized and under development.
   - You can check the current provider in `.cloudopsworks/.provider`.
@@ -83,7 +83,10 @@ This document provides instructions for AI Agents working with the implementatio
 
 ## Versioning Management
 
-Module versioning follows GitHub Flow — a simplified branching model where feature branches are created from and merged back into `master`. Branch and release operations are `make`-only — the `tronador` CLI does not cover `gitflow/*`.
+Module versioning follows GitHub Flow — a simplified branching model where feature branches are created from and merged back into `master`. Use the `tronador versions` command set for branch, pull-request, and version-tag operations.
+
+Before starting a feature, verify that the active GitVersion configuration declares the intended `# Agents: WayOfWork=githubflow` policy. Missing or contradictory metadata is a blocker: do not accept the CLI's GitFlow fallback silently. Under GitHub Flow, `tronador versions feature start "<feature-name>"` starts from the configured primary branch; GitFlow would start from `develop`, while trunk-based flow also uses the configured primary branch.
+
 - There is a skill related to this template module and their implementations, it can be found in the [Claude Code Skills - cw-release](https://github.com/cloudopsworks/claude-code-skills/tree/main/cw-release) can be used in any agent anyway, install and use it.
 
 ### General Rules
@@ -94,10 +97,10 @@ Module versioning follows GitHub Flow — a simplified branching model where fea
 - There is no `develop` branch — all work flows directly through feature branches to `master`. This approach simplifies the development workflow and enables continuous integration and deployment from the main branch.
 - Avoid in the commit comments explicitly mentioning `+semver:` changes within changesets, describe it with other words. The semver annotations should only be present in commit messages and PR descriptions to trigger the correct version bump in CI.
 - Avoid scrubbing into Makefile or tronador utility scripts.
-- Use `make` targets for branch and release operations, which the CLI does not cover.
+- Use `tronador versions` for branch and release operations; do not use the deprecated Make interface.
 
 <a id="tronador-cli-coverage"></a>
-- **Use the `tronador` CLI.** The `Makefile` is deprecated for the `repos/*`, `fmt`, `lint` and `readme` families — the tables below map each retired `make` target to its CLI replacement. Only the operations listed as not covered remain `make`-based. All CLI commands accept the `--dry-run` and `--verbose` global flags plus a `--workdir <dir>` scoping flag.
+- **Use the `tronador` CLI.** The `Makefile` is deprecated for the `repos/*`, `fmt`, `lint`, README, and Git-flow/version operations, including destructive purge — the tables below map retired targets to CLI replacements. All CLI commands accept the `--dry-run` and `--verbose` global flags plus a `--workdir <dir>` scoping flag.
 
   **Repository template lifecycle (`repos/*`)**
 
@@ -124,7 +127,7 @@ Module versioning follows GitHub Flow — a simplified branching model where fea
   |------------------------|--------------------------------------------------|
   | `make fmt`             | `tronador project format` (alias `fmt`)          |
   | `make lint`            | `tronador project lint` (alias `validate`)       |
-  | `make init/<provider>` | `tronador project init <provider>`               |
+  | `make init/<provider>` | `tronador project init <provider> --allow-network` |
   | —                      | `tronador project detect` — show detected implementation |
   | —                      | `tronador project capabilities` — list supported capabilities |
 
@@ -135,7 +138,7 @@ Module versioning follows GitHub Flow — a simplified branching model where fea
   | `make readme`     | `tronador readme build`   |
   | `make readme/lint`| `tronador readme lint`    |
   | `make readme/init`| `tronador readme init`    |
-  | `make readme/deps`| `tronador readme deps`    |
+  | `make readme/deps`| `tronador docs targets`    |
 
   **Documentation generation (`docs/*`)**
 
@@ -146,7 +149,9 @@ Module versioning follows GitHub Flow — a simplified branching model where fea
   | `make docs/copyright-add`| `tronador docs copyright-add`|
   | —                        | `tronador docs init`         |
 
-  **Not covered by the CLI — use `make`:** all `gitflow/*` targets (`gitflow/hotfix/start`, `gitflow/feature/start-no-develop:<name>`, `gitflow/*/publish`, `gitflow/*/finish`, `gitflow/version/tag`, `gitflow/version/publish`, `gitflow/version/semver`) and the `tag` / `tag_local` targets. Branch, tagging, and publish operations remain `make`-only. See [Pre-Release Tagging for Module Testing](#pre-release-tagging-for-module-testing-alpha--beta) for using `gitflow/version/tag` and `gitflow/version/publish` on a branch. `gitflow/version/file` is **not** part of any workflow in this repository — see [Version File (`_VERSION`)](#version-file).
+  **Branch and version workflows:** use `tronador versions feature|hotfix start|publish|finish` and `tronador versions tag --publish`. After verifying the corresponding merge completed, destructive cleanup must use `tronador versions feature purge ... --allow-network`, `tronador versions hotfix purge ... --allow-network`, or `tronador versions release purge ... --allow-network`. Fail closed if the WayOfWork policy, merge evidence, authentication, or remote state is missing or contradictory; do not fall back to Make. For a GitFlow release merged into `support/*`, the release must also be back-integrated into `develop` before purge; otherwise Tronador intentionally refuses deletion. CI jobs must install the CLI first with `uses: cloudopsworks/install-tronador-cli@v1`. Legacy version-file generation is **not** part of any workflow in this repository — see [Version File (`_VERSION`)](#version-file).
+
+  Run `tronador project version --generate --yes` only after verified GitHub-template or source-owner policy explicitly makes `_VERSION` writable. When authorized, it only writes the guarded file and never commits, tags, or pushes; review, stage, and commit it through the normal feature-branch and PR flow. In implementation repositories `_VERSION` remains protected by the policy below, and marker presence or inherited prose never grants authority.
 
   Two behavioural differences to be aware of when substituting the CLI for `make`:
   - `tronador project lint` runs `tofu validate` followed by `tofu fmt -check`. It does not run the provider-chomp step (`temp_provider`) or the `tofu/get-modules` + `tofu/get-plugins` pipeline, so fetch providers and modules first when linting a module that has not been initialised.
@@ -187,32 +192,31 @@ refactor!: remove deprecated outputs +semver: breaking   # MAJOR
 
 ### New Module Features and Provider Version Upgrades
 
-All new features and provider version upgrades branch directly from `master` using the no-develop targets:
+All new features and provider version upgrades branch directly from `master` using the workflow-aware Tronador commands:
 
 1. Create a feature branch from `master`:
    ```sh
-   make gitflow/feature/start-no-develop:<feature-name>
+   tronador versions feature start "<feature-name>"
    ```
 2. Implement changes and validate:
    ```sh
    tronador project format
    tronador project lint
    ```
-3. **Publish first** — the tag and finish steps both require the branch to exist on the remote:
+3. **Publish first** — the tag and finish commands both require the branch to exist on the remote:
    ```sh
-   make gitflow/feature/publish:<feature-name>   # push branch to remote
+   tronador versions feature publish "<feature-name>"   # push branch to remote
    ```
 4. Cut a pre-release tag and test the branch before finishing:
    ```sh
-   make gitflow/version/tag       # -> v<x.y.z>-alpha.N
-   make gitflow/version/publish   # push that tag
+   tronador versions tag --publish   # creates and pushes v<x.y.z>-alpha.N
    ```
    See [Pre-Release Tagging for Module Testing](#pre-release-tagging-for-module-testing-alpha--beta).
 5. Satisfy the [Release Gate](#release-gate), then finish — this creates the PR:
    ```sh
-   make gitflow/feature/finish-no-develop:<feature-name>
+   tronador versions feature finish "<feature-name>"
    ```
-6. After the PR is merged: in an implementation repository CI tags the release automatically; in **this template repository** cut it locally with `make gitflow/version/tag && make gitflow/version/publish` from an up-to-date `master`.
+6. After the PR is merged: in an implementation repository CI tags the release automatically; in **this template repository** cut it locally with `tronador versions tag --publish` from an up-to-date `master`.
 
 For provider upgrades, increment the semver digit accordingly: **MAJOR** for breaking provider changes (e.g., AWS `4.x` → `5.x`), **MINOR** for backwards-compatible upgrades.
 
@@ -222,7 +226,7 @@ Workflow upgrades and documentation-only fixes are patch-level changes and use t
 
 1. Start a hotfix branch from `master`:
    ```sh
-   make gitflow/hotfix/start
+   tronador versions hotfix start
    ```
 2. Apply changes (run the template upgrade, then update docs as needed):
    ```sh
@@ -234,25 +238,24 @@ Workflow upgrades and documentation-only fixes are patch-level changes and use t
    ```sh
    git commit -m "docs: sync inputs.yaml and update docs +semver: patch"
    ```
-4. **Publish first** — the tag and finish steps both require the branch to exist on the remote:
+4. **Publish first** — the tag and finish commands both require the branch to exist on the remote:
    ```sh
-   make gitflow/hotfix/publish   # push branch to remote
+   tronador versions hotfix publish   # push branch to remote
    ```
 5. When the hotfix touches module code, cut a pre-release tag and test it before finishing:
    ```sh
-   make gitflow/version/tag       # -> v<x.y.z>-beta.N
-   make gitflow/version/publish   # push that tag
+   tronador versions tag --publish   # creates and pushes v<x.y.z>-beta.N
    ```
    See [Pre-Release Tagging for Module Testing](#pre-release-tagging-for-module-testing-alpha--beta). Documentation-only hotfixes may record the gate as not applicable.
 6. Satisfy the [Release Gate](#release-gate), then finish — this creates the PR:
    ```sh
-   make gitflow/hotfix/finish
+   tronador versions hotfix finish
    ```
 7. Wait for all CI checks to pass, then merge with `gh` CLI (see [PR Merge Guidelines](#pr-merge-guidelines)).
 8. In **this template repository only**, cut the release tag locally once the PR is merged and `master` is pulled — the merge-tagging workflow does not run here:
    ```sh
    git checkout master && git pull origin master
-   make gitflow/version/tag && make gitflow/version/publish
+   tronador versions tag --publish
    ```
 
 <a id="version-file"></a>
@@ -269,7 +272,7 @@ implementation module — the file is **read-only**:
 
 - Do not hand-edit it.
 - Do not stage or commit it.
-- Do not run `make gitflow/version/file`.
+- Do not run `tronador project version --generate --yes` in an implementation repository.
 - A value that trails this repository's latest release tag is **correct**, not drift. The file
   names the template generation, not this module's version. Do not "repair" it.
 
@@ -289,7 +292,9 @@ Feature and hotfix branches can publish **intermediate pre-release tags** so a m
 
 Pre-release tagging on a branch is always manual, in both cases.
 
-The two targets CI runs on `master` after a PR merge also work on any branch — `gitflow/version/tag` simply switches which GitVersion variable it reads:
+The tag command CI runs on `master` after a PR merge also works on any branch —
+`tronador versions tag` selects the appropriate GitVersion value for the current
+branch.
 
 | Current branch      | GitVersion variable | Tag produced        |
 |---------------------|---------------------|---------------------|
@@ -302,22 +307,18 @@ The `alpha` / `beta` label comes from the branch configuration in `.cloudopswork
 
 #### Workflow
 
-Ordering is strict: both targets abort unless the remote branch tip equals local `HEAD`, so the branch must be published before it can be tagged.
+Ordering is strict: the commands abort unless the remote branch tip equals local `HEAD`, so the branch must be published before it can be tagged.
 
 1. Commit the work on the feature or hotfix branch.
-2. Push the branch — required, the tag step verifies remote/local parity:
+2. Push the branch — required, the tag command verifies remote/local parity:
    ```sh
-   make gitflow/feature/publish:<feature-name>   # or, on a hotfix branch: make gitflow/hotfix/publish
+   tronador versions feature publish "<feature-name>"   # or, on a hotfix branch: tronador versions hotfix publish
    ```
-3. Create the pre-release tag locally:
+3. Create and publish the pre-release tag:
    ```sh
-   make gitflow/version/tag
+   tronador versions tag --publish
    ```
-4. Push that tag:
-   ```sh
-   make gitflow/version/publish
-   ```
-5. Consume the tag from a test deployment:
+4. Consume the tag from a test deployment:
    ```hcl
    terraform {
      source = "git::https://github.com/<owner>/<repo>.git//?ref=v1.6.56-alpha.1"
@@ -336,25 +337,24 @@ No manual version bookkeeping is required, and no `+semver:` annotation is neede
 
 #### Deploy-targeted variant
 
-`gitflow/version/tag/<meta>` produces the same version with build metadata appended, for pinning a build to a specific deploy target:
+`tronador versions tag "<meta>"` produces the same version with build metadata appended, for pinning a build to a specific deploy target:
 
 ```sh
-make gitflow/version/tag/<meta>   # -> v1.6.56-alpha.3+deploy-<meta>
-make gitflow/version/publish
+tronador versions tag "<meta>" --publish   # -> v1.6.56-alpha.3+deploy-<meta>
 ```
 
 #### Agent Responsibilities
 
-- When the user asks to **test, try out, validate, or dogfood a work-in-progress branch** before its PR is finished or merged, the agent must cut and push a pre-release tag with `make gitflow/version/tag` followed by `make gitflow/version/publish`, then report the resulting tag and the exact `ref=` string to use. Never tell the user to merge first in order to test — that is what the pre-release tag exists to avoid.
-- Cutting a pre-release tag pushes to a public remote and creates a GitHub pre-release. Confirm with the user before running `make gitflow/version/publish` unless they have already asked for the tag.
-- Never cut a pre-release from `master` — on `master` the same target produces a final release tag.
+- When the user asks to **test, try out, validate, or dogfood a work-in-progress branch** before its PR is finished or merged, the agent must cut and push a pre-release tag with `tronador versions tag --publish`, then report the resulting tag and the exact `ref=` string to use. Never tell the user to merge first in order to test — that is what the pre-release tag exists to avoid.
+- Cutting a pre-release tag pushes to a public remote and creates a GitHub pre-release. Confirm with the user before running `tronador versions tag --publish` unless they have already asked for the tag.
+- Never cut a pre-release from `master` — on `master` the same command produces a final release tag.
 - After a pre-release tag is published, report it back in the form the operator will paste, e.g. `?ref=v1.6.56-alpha.2`.
 
 #### Release Gate
 
 A feature or hotfix branch must not be finished or merged until its changes have been exercised from a published pre-release tag.
 
-Before running `make gitflow/feature/finish-no-develop` / `make gitflow/hotfix/finish`, and again before `gh pr merge`, verify:
+Before running `tronador versions feature finish` / `tronador versions hotfix finish`, and again before `gh pr merge`, verify:
 
 1. A pre-release tag exists for the work under review — check with `git tag --list --points-at HEAD` and `git describe --tags`.
 2. That tag has been deployed and exercised against a real target, and the outcome reported.
@@ -368,10 +368,10 @@ If the gate cannot be satisfied — for example the module has no deployable tes
 
 #### Rules and caveats
 
-- **Publish the branch first.** `gitflow/version/tag` and `gitflow/version/publish` both compare `git ls-remote <branch>` against local `HEAD`, and refuse with `You must be in the latest commit of the branch to tag` otherwise.
-- **One tag per commit, then publish.** `gitflow/version/publish` pushes exactly one tag, resolved through `git describe --tags --abbrev=0`. Always pair tag and publish; never stack two tags on the same commit and expect both to be pushed.
-- **Floating major/minor tags are never touched.** `make tag` / `tag_local` — which force-move `v1` and `v1.6` — check out `master` first and are a separate path. Consumers pinned to `?ref=v1` will never resolve to a pre-release.
-- **Pre-release tags do not perturb the final release version.** `gitflow/version/tag` on `master` reads `MajorMinorPatch`, so merged `-alpha.N` / `-beta.N` tags never leak into the release tag and do not shift the version CI computes after the PR merge.
+- **Publish the branch first.** `tronador versions tag --publish` compares `git ls-remote <branch>` against local `HEAD`, and refuses with `You must be in the latest commit of the branch to tag` otherwise.
+- **One tag per commit, then publish.** `tronador versions tag --publish` pushes exactly one tag, resolved through `git describe --tags --abbrev=0`. Always pair tag and publish; never stack two tags on the same commit and expect both to be pushed.
+- **Floating major/minor tags are never touched.** Legacy floating-tag maintenance that force-moves `v1` and `v1.6` is a separate operator-controlled path; `tronador versions tag` does not move those aliases. Consumers pinned to `?ref=v1` will never resolve to a pre-release.
+- **Pre-release tags do not perturb the final release version.** `tronador versions tag` on `master` reads `MajorMinorPatch`, so merged `-alpha.N` / `-beta.N` tags never leak into the release tag and do not shift the version CI computes after the PR merge.
 - **A GitHub pre-release is published automatically.** `.github/workflows/release-management.yml` triggers on `v[0-9]+.[0-9]+.[0-9]+**`, which matches pre-release tags, and forwards `is_pre_release` to the release step. Pushing an `-alpha.N` tag creates a GitHub Release flagged as a pre-release; it does not become "Latest".
 - **Pre-release tags are not a substitute for the PR.** They exist for testing only — the final version is still cut by merging the PR into `master`.
 
@@ -403,7 +403,7 @@ Key rules:
 
 ### Summary Table
 
-> **Command column:** use the `tronador` CLI. The `Makefile` is deprecated for `repos/*`, `fmt`, `lint` and `readme`; only `gitflow/*` targets remain `make`-only.
+> **Command column:** use the `tronador` CLI. The `Makefile` is deprecated for `repos/*`, `fmt`, `lint`, `readme`, and Git-flow/version operations, including destructive purge; use Tronador.
 
 | Change Type                                      | Branch Type | Merges Into | Command                 | Semver Impact | Annotation                          |
 |--------------------------------------------------|-------------|-------------|-------------------------|---------------|-------------------------------------|
@@ -415,7 +415,7 @@ Key rules:
 | Provider minor/patch version upgrade             | `feature`   | `master`    | —                       | MINOR / PATCH | `+semver: minor` / `+semver: patch` |
 | New module feature                               | `feature`   | `master`    | —                       | MINOR         | `+semver: feature`                  |
 | Bug fix                                          | `feature`   | `master`    | —                       | PATCH         | `+semver: fix`                      |
-| Intermediate pre-release for module testing      | `feature` / `hotfix` | — (not merged) | `make gitflow/version/tag` + `make gitflow/version/publish` | PRE-RELEASE   | — (counter auto-advances)           |
+| Intermediate pre-release for module testing      | `feature` / `hotfix` | — (not merged) | `tronador versions tag --publish` | PRE-RELEASE   | — (counter auto-advances)           |
 | Breaking / incompatible change                   | `feature`   | `master`    | —                       | MAJOR         | `+semver: major` or `+semver: breaking` |
 
 

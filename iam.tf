@@ -1,7 +1,10 @@
 ##
-# (c) 2022-2024 - Cloud Ops Works LLC - https://cloudops.works/
-#            On GitHub: https://github.com/cloudopsworks
-#            Distributed Under Apache v2.0 License
+# (c) 2021-2026
+#     Cloud Ops Works LLC - https://cloudops.works/
+#     Find us on:
+#       GitHub: https://github.com/cloudopsworks
+#       WebSite: https://cloudops.works
+#     Distributed Under Apache v2.0 License
 #
 data "aws_caller_identity" "current" {}
 
@@ -99,14 +102,17 @@ data "aws_iam_policy_document" "allowed_secrets" {
     ]
     resources = var.settings.allowed_secrets
   }
-  statement {
-    sid    = "RandomPassword"
-    effect = "Allow"
-    actions = [
-      "secretsmanager:GetRandomPassword",
-      "secretsmanager:UpdateSecretVersionStage",
-    ]
-    resources = ["*"]
+  dynamic "statement" {
+    for_each = local.api_key_rotation ? [] : [1]
+    content {
+      sid    = "RandomPassword"
+      effect = "Allow"
+      actions = [
+        "secretsmanager:GetRandomPassword",
+        "secretsmanager:UpdateSecretVersionStage",
+      ]
+      resources = ["*"]
+    }
   }
 }
 
@@ -115,6 +121,60 @@ resource "aws_iam_role_policy" "allowed_secrets" {
   name   = "${local.function_name_short}-allow-secret-policy"
   role   = aws_iam_role.default_lambda_function.name
   policy = data.aws_iam_policy_document.allowed_secrets[0].json
+}
+
+data "aws_secretsmanager_secret" "management_api_key" {
+  count = local.api_key_rotation ? 1 : 0
+
+  arn  = startswith(local.management_secret_id, "arn:") ? local.management_secret_id : null
+  name = startswith(local.management_secret_id, "arn:") ? null : local.management_secret_id
+}
+
+data "aws_kms_key" "management_api_key" {
+  count = local.api_key_rotation && try(trimspace(data.aws_secretsmanager_secret.management_api_key[0].kms_key_id), "") != "" ? 1 : 0
+
+  key_id = data.aws_secretsmanager_secret.management_api_key[0].kms_key_id
+}
+
+data "aws_iam_policy_document" "management_api_key" {
+  count = local.api_key_rotation ? 1 : 0
+
+  statement {
+    sid       = "ReadManagementApiKey"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [local.management_secret_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "management_api_key" {
+  count  = local.api_key_rotation ? 1 : 0
+  name   = "${local.function_name_short}-management-key-policy"
+  role   = aws_iam_role.default_lambda_function.name
+  policy = data.aws_iam_policy_document.management_api_key[0].json
+}
+
+data "aws_iam_policy_document" "management_api_key_kms" {
+  count = length(data.aws_kms_key.management_api_key)
+
+  statement {
+    sid       = "DecryptManagementApiKey"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt"]
+    resources = [data.aws_kms_key.management_api_key[0].arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:SecretARN"
+      values   = [local.management_secret_arn]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "management_api_key_kms" {
+  count  = length(data.aws_kms_key.management_api_key)
+  name   = "${local.function_name_short}-management-key-kms-policy"
+  role   = aws_iam_role.default_lambda_function.name
+  policy = data.aws_iam_policy_document.management_api_key_kms[0].json
 }
 
 data "aws_iam_policy_document" "allowed_kms" {

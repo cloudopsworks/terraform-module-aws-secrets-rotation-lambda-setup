@@ -19,15 +19,16 @@ copyrights:
 github_repo: cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup
 
 description: |-
-  Terraform module that packages and deploys an AWS Secrets Manager rotation Lambda for PostgreSQL, MySQL, MariaDB, MSSQL, MongoDB, MongoDB Atlas, Oracle, and DB2 engines, with optional VPC attachment and IAM extensions.
+  Terraform module that packages and deploys an AWS Secrets Manager rotation Lambda for database credentials and OpenAI or OpenRouter API keys, with optional VPC attachment and IAM extensions.
 
 # Introduction to the project
 introduction: |-
-  This module creates the AWS Lambda function, execution role, CloudWatch log group, optional VPC networking, and supporting IAM policies required to run Secrets Manager rotation workflows. It supports both single-user and alternating-users rotation patterns, injects engine-specific dependencies during packaging, and exposes the Lambda and networking outputs needed by downstream stacks.
+  This module creates the AWS Lambda function, execution role, CloudWatch log group, optional VPC networking, and supporting IAM policies required to run Secrets Manager rotation workflows. Database integrations use engine-specific dependencies and may support single-user or alternating-users patterns. OpenAI and OpenRouter API-key rotation is single-user only. For those integrations, supply an existing AWS Secrets Manager secret containing the upstream management credential by name or ARN. The module resolves its ARN and KMS key, injects the ARN into the Lambda environment, and grants read access; it does not create, populate, or manage that secret or its plaintext value. The rotated workload-key secret and its rotation schedule are managed separately.
 
 # How to use this project
 usage: |-
   Bootstrap a new Terragrunt unit with Terragrunt scaffold, then fill in the generated `inputs.yaml`.
+  For `openai` or `openrouter`, create and populate the external management and workload-key secrets before the apply step; follow the API-key setup steps below.
 
   ```bash
   # 1. Create and enter the target deployment directory
@@ -135,13 +136,47 @@ usage: |-
   Example `inputs.yaml`:
 
   ```yaml
+  # Module configuration
+  # NOTE: When scaffolded with vpc_module_enabled=true (default), the vpc block in the generated
+  # terragrunt.hcl is auto-wired from the VPC module dependency — the vpc section below is not used.
+  # Set vpc_module_enabled=false during scaffold to supply vpc inputs manually from this file.
   settings:
-    type: postgres # (Required) Database engine used by the rotation Lambda. Valid values: postgres, mysql, mariadb, mssql, mongodb, mongodbatlas, oracle, db2.
+    type: postgres # (Required) Rotation target. Valid values: postgres, mysql, mariadb, mssql, mongodb, mongodbatlas, oracle, db2, openai, openrouter.
     description: "Secrets rotation lambda for the primary application database" # (Optional) Custom Lambda description. Default: Terraform builds one from type and multi_user.
-    multi_user: false # (Optional) Enable alternating-users rotation strategy. Default: false.
+    multi_user: false # (Optional) Enable alternating-users rotation strategy. Default: false. Must be false for API-key types.
     timeout: 60 # (Optional) Lambda timeout in seconds. Default: 60.
     memory_size: 128 # (Optional) Lambda memory size in MB. Default: 128.
     password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
+    # For type: openai or openrouter, supply a pre-existing AWS Secrets Manager management secret.
+    # OpenAI accepts JSON {"api_key":"<admin management key>"}; organization_id is optional and must match the configured ID if present.
+    # Use exactly one credential field: api_key, admin_api_key, or management_api_key.
+    # OpenRouter requires JSON {"api_key":"<management key>"}. This module never manages either secret.
+    # Never put the management key value in Terraform inputs.
+    # Seed the external target secret separately. Both API-key providers require
+    # a versioned TFCONFIG with schema_version: 1 and an AWSCURRENT credential.
+    # A new admin/OpenRouter target has AWSCURRENT and TFBOOTSTRAP on the same version,
+    # holding api_key: null and api_key_id: "__CREATE_NEW__". A new OpenAI project
+    # target may use the same null/key-ID marker in its six-field project payload.
+    # Project bootstrap identity must match TFCONFIG; Lambda creates the first key.
+    # Lambda reads TFCONFIG,
+    # never writes either Terraform-owned label, and pins configuration and
+    # predecessor details in a Lambda-owned ROTATIONINTENT version until finish.
+    # Provider selection comes only from settings.type; no provider field is needed.
+    # This Lambda module never accepts a workload-key value. Legacy real-key project
+    # bootstraps remain supported; keyless bootstrap avoids Terraform-owned credentials.
+    # api_key_name: rotated-api-key # (Optional) Legacy setting ignored for API-key rotation; TFCONFIG supplies the resolved name.
+    # management_api_key: # (Required for openai/openrouter) Pre-existing management key secret.
+    #   secret_arn: app/management # (Required) Existing secret name or ARN. The module resolves its ARN and KMS key automatically.
+    # openai: # (Required when type is openai) Organization binding for the external admin key.
+    #   organization_id: org_123 # (Required) Authoritative organization ID; must match the secret only if it declares an organization_id.
+    # openrouter: # (Optional when type is openrouter) Legacy inputs ignored by the OpenRouter Lambda; TFCONFIG is authoritative.
+    #   limit: 10.0 # (Optional) Legacy setting ignored; resolved limit comes from TFCONFIG.
+    #   limit_reset: daily # (Optional) Legacy setting ignored; resolved reset interval comes from TFCONFIG.
+    #   include_byok_in_limit: false # (Optional) Legacy setting ignored; resolved BYOK option comes from TFCONFIG.
+    #   expires_at: "2027-01-01T00:00:00Z" # (Optional) Legacy setting ignored; resolved expiration comes from TFCONFIG.
+    #   workspace_id: 00000000-0000-0000-0000-000000000000 # (Optional) Legacy setting ignored; resolved workspace comes from TFCONFIG.
+    #   creator_user_id: user_123 # (Optional) Legacy setting ignored; resolved creator comes from TFCONFIG.
+    # OpenRouter external keys are not supported: never put an external API key in Terraform inputs.
     log_retention_days: 14 # (Optional) CloudWatch Logs retention in days. Default: 14.
     logging: # (Optional) Lambda advanced logging configuration.
       log_format: JSON # (Optional) Log output format. Valid values: JSON, Text. Default: JSON.
@@ -151,7 +186,7 @@ usage: |-
       variables:
         - name: EXTRA_CA_CERTS # (Required) Environment variable name.
           value: /opt/certs/custom-ca.pem # (Required) Environment variable value.
-    allowed_secrets: # (Optional) Additional Secrets Manager secret ARNs the rotation function may read and update.
+    allowed_secrets: # (Optional for database types; required for API-key types) Secrets Manager target secret ARNs the rotation function may read and update.
       - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/postgres-credentials-AbCdEf
     allowed_kms: # (Optional) KMS key ARNs used to decrypt the allowed secrets.
       - arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
@@ -163,6 +198,8 @@ usage: |-
           resource: # (Required) ARNs the statement applies to.
             - arn:aws:rds-db:us-east-1:111122223333:dbuser:db-ABCDEFGHIJKLMNOP/app_user
 
+  # VPC configuration — only used when vpc_module_enabled=false during scaffold.
+  # When vpc_module_enabled=true (default), subnets are sourced from the VPC dependency block.
   vpc:
     enabled: false # (Optional) Attach the Lambda function to a VPC. Default: false.
     subnets: # (Required when vpc.enabled is true) Private subnet IDs for Lambda ENIs.
@@ -172,6 +209,104 @@ usage: |-
     security_groups: # (Required when vpc.enabled is true and create_security_group is false) Existing security group IDs to attach.
       - sg-0123456789abcdef0
   ```
+
+  **OpenAI and OpenRouter key rotation**
+
+  1. Obtain an independent OpenAI organization admin key or an OpenRouter management key through the upstream provider. OpenAI project rotation requires an existing project and service account; Terraform owns those identities, not this Lambda.
+  2. Create and populate the management-key secret **outside this module** before planning. Its `AWSCURRENT` `SecretString` is `{"api_key":"<admin management key>"}` for OpenAI, or `{"api_key":"<management key>"}` for OpenRouter. OpenAI accepts exactly one credential field: `api_key`, `admin_api_key`, or `management_api_key`. The secret can omit `organization_id`; if present, it must be a string exactly matching `settings.openai.organization_id` (null and empty values are invalid). Set `settings.management_api_key.secret_arn` to its plan-time-known name or full ARN. The module resolves the canonical ARN and customer-managed KMS key through data sources and grants scoped access. Do not set `settings.management_api_key.kms_key_arn`; it is rejected. The deployment identity needs permission to read secret metadata and resource policy and describe its KMS key; the key policy must allow Lambda decrypt. Do not put live credentials in Terraform inputs or shell history.
+  3. Set `settings.type` to `openai` or `openrouter`, `settings.multi_user: false`, and scope `settings.allowed_secrets` to the target Secrets Manager ARNs. This grants the Lambda IAM access; it is not a second runtime enrollment list. Prefer exact target ARNs over a broad wildcard, and put KMS key ARNs in `allowed_kms` instead. The Lambda uses `settings.type` as its sole provider selector; the secret does not choose a provider. For OpenAI, set `settings.openai.organization_id` to the required organization ID used on every OpenAI request, even if the secret does not declare one. Response `openai-organization` metadata does not override this configured ID or gate successful responses; it is not documented as a canonical-ID echo. OpenAI still authorizes every request scoped by the configured `OpenAI-Organization` header.
+  4. Seed the target secret and `TFCONFIG` outside this module. For OpenAI, use the contract below; for OpenRouter, use its contract below. The Lambda never writes `TFCONFIG` or `TFBOOTSTRAP`. Apply the Terragrunt unit; this module injects `MANAGEMENT_SECRET_ARN` and grants access to the supplied management secret, but never creates or mutates it.
+  5. Configure the target secret's Secrets Manager rotation schedule to invoke the output `lambda_arn`; this module deploys the Lambda but does not create the target secret or schedule. The Lambda promotes the tested pending key to `AWSCURRENT` before retiring the previous upstream key. Revocation follows promotion without a grace period; consumers must refresh `AWSCURRENT` promptly.
+
+  **OpenAI target-secret contract**
+
+  The target secret's Terraform-owned `TFCONFIG` version must contain exactly the resolved settings below. The Lambda retries a temporarily missing stage, then fails closed rather than using defaults. It snapshots the full JSON and `TFCONFIG` VersionId for the rotation token; replacing configuration affects only a later token. Project and service-account IDs are Terraform-owned identities, not resources recreated during ordinary rotation.
+
+  ```json
+  {
+    "schema_version": 1,
+    "key_type": "project",
+    "name": "resolved-key-name",
+    "project_id": "proj_123",
+    "service_account_id": "svc_acct_123",
+    "scopes": ["api.model.read"],
+    "role": "owner",
+    "expires_in_seconds": null
+  }
+  ```
+
+  Use `key_type: "admin"` with `project_id`, `service_account_id`, `scopes`, and `role` all `null` for an admin key. A project key requires both IDs; `role` may be `owner`, `member`, or `null` to omit the role check. The Lambda checks the existing service account and provider key owner/role; it does not create or patch the account. For project keys, `scopes: null` omits the Create field, while `scopes: []` sends an empty array. [OpenAI documents an empty array as unrestricted, subject to the owner’s permissions](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/projects/subresources/api_keys/methods/update); do not use it to mean “no access.” The plaintext `/models` probe is attempted only for a configured `owner` role with no scope restriction or explicit `api.model.read`; there is no universal safe probe for other keys. For other scope/role combinations, the Lambda uses management-key metadata retrieval to check identity and expiry instead of claiming to have tested the candidate plaintext. An actual candidate-authentication error from an attempted probe still fails rotation.
+
+  A new **admin** target has one `AWSCURRENT`/`TFBOOTSTRAP` version containing exactly `{"api_key":null,"api_key_id":"__CREATE_NEW__"}`. A new **project** target may use a keyless six-field bootstrap: `{"key_type":"project","api_key":null,"api_key_id":"__CREATE_NEW__","name":"resolved-key-name","project_id":"proj_123","service_account_id":"svc_acct_123"}` on the same two labels. Its identity must match `TFCONFIG`; Lambda issues the first expiring key without retiring a nonexistent predecessor. Legacy real-key six-field project bootstraps remain supported: that key is retired only after a replacement is validated and promoted. Provision the service account in identity-only mode when using keyless bootstrap; this Lambda does not create or change the account. A migrated active key without `TFBOOTSTRAP` may rotate if it already has the exact six-field payload. Every usable OpenAI credential version has **only** `key_type`, `api_key`, `api_key_id`, `name`, `project_id`, and `service_account_id`; admin credentials have null project and service-account IDs. Put scopes and lifetime in `TFCONFIG`, not in the credential. Malformed sentinels, legacy payloads, and changes to the current key's type or project identity fail closed until migrated.
+
+  ```json
+  {
+    "key_type": "project",
+    "api_key": "<provider-created plaintext key>",
+    "api_key_id": "<OpenAI key ID>",
+    "name": "resolved-key-name",
+    "project_id": "proj_123",
+    "service_account_id": "svc_acct_123"
+  }
+  ```
+
+  **Explicit legacy credential handoff:** ordinary rotation still rejects incomplete credentials and current/configured identity mismatches. An authorized operator can invoke `createSecret` for an enrolled pending token with the additional object below. `PreviousVersionId` must identify the exact current version; this is a one-token migration approval, not a persistent bypass. `TFCONFIG` remains authoritative for the replacement. The old credential stays current until the replacement passes normal identity, expiry, and authentication checks.
+
+  ```json
+  {
+    "SecretId": "<target secret ARN>",
+    "ClientRequestToken": "<existing AWSPENDING token>",
+    "Step": "createSecret",
+    "CredentialHandoff": {
+      "PreviousVersionId": "<exact AWSCURRENT version ID>",
+      "RetirePreviousKey": true
+    }
+  }
+  ```
+
+  `RetirePreviousKey: true` requires the complete existing six-field credential and independently verified provider metadata. The predecessor identity is pinned separately from the replacement, so retirement uses the old project's endpoint and owner, never an identity copied from the new configuration. Set `RetirePreviousKey: false` only when explicitly accepting retained predecessor access, including an old-provider JSON object containing just `api_key`. Rotation can then replace that legacy payload, but logs `predecessor_retirement_deferred`; predecessor revocation is **not** claimed. Keep the old version for separately verified cleanup. OpenAI exposes no documented exact plaintext-key-to-ID lookup; names, redacted values, or a matching account alone do not authorize deletion. The handoff intent pins a digest of the original secret and preserves normal retry/orphan safeguards. Resume the remaining normal steps with the same token; do not start another Create after an ambiguous response. Do not remove a failed pending label until its stored value and intent have been reconciled.
+
+  OpenAI `expires_in_seconds` is a **relative TTL**, not a timestamp: an explicit integer from 1 through 31536000 is sent unchanged. If null, the Lambda derives a TTL from the Secrets Manager interval, rotation window, and safety guard, then verifies provider metadata has a finite expiration and adequate remaining lifetime. Every newly issued rotated key must expire; null config means derive a lifetime, never create a nonexpiring key. Derived mode supports `rate(N hours)`, `rate(N days)`, or legacy `AutomaticallyAfterDays`; unsupported schedules need an explicit TTL. The Lambda uses the independent organization-bound admin key to create, retrieve, and delete keys. It writes an `AWSPENDING` six-field credential under `ClientRequestToken`, validates it, promotes it to `AWSCURRENT`, then revokes the verified predecessor unless an explicit preserve-predecessor handoff was approved. The management secret is never the rotation target or the credential being retired.
+
+  As with OpenRouter, `ROTATIONINTENT` holds the pinned configuration/version, predecessor, and effective TTL until retirement and pending-label cleanup complete. A retry reuses an existing matching `AWSPENDING`; an ambiguous Create without a durable pending value stops for explicit `reconcileOrphan`, because the one-time plaintext cannot be recovered. Operators must confirm the orphan ID from provider/audit evidence or confirm that no key was created, and must abandon old token stages before reconciliation. Matching by name or owner is unsafe: an incorrect supplied ID can revoke another key with the same metadata. The Lambda removes only its own `AWSPENDING` and `ROTATIONINTENT` stages after completion, leaving `AWSCURRENT`, `TFCONFIG`, and `TFBOOTSTRAP` alone. Disabling rotation, deleting the secret, or losing `TFCONFIG` never revokes the final current key; final-key decommissioning is a separate operator action. See [ADR 0002](docs/adr/0002-openai-management-key-rotation.md) for the full failure and migration policy.
+
+  **OpenRouter target-secret contract**
+
+  The target secret's `TFCONFIG` version must be a JSON object with exactly these resolved settings. Keep the stage attached throughout rotation; this module does not create it. The Lambda retries a briefly missing `TFCONFIG` read and fails rather than using the old key, Lambda environment, or defaults. It snapshots the complete values and `TFCONFIG` VersionId for each rotation token; a later configuration replacement affects the next token, not the in-flight one.
+
+  ```json
+  {
+    "schema_version": 1,
+    "name": "resolved-key-name",
+    "workspace_id": null,
+    "limit": null,
+    "limit_reset": null,
+    "include_byok_in_limit": null,
+    "disabled": null,
+    "expires_at": null,
+    "creator_user_id": null
+  }
+  ```
+
+  The Lambda sends `name` plus non-null creation fields to [OpenRouter Create](https://openrouter.ai/docs/api/api-reference/api-keys/create-a-new-api-key), preserving `false` and `0`. It never sends `disabled` in Create; `setSecret` [PATCHes](https://openrouter.ai/docs/api/api-reference/api-keys/update-an-api-key) `disabled` when the setting is not null, including `false`. If `workspace_id` is null, Create omits it; OpenRouter may assign a default workspace. The credential stores the actual workspace returned by management lookup, not an assumed null. `testSecret` checks provider metadata and uses the workload key for enabled-key authentication; intentionally disabled keys are checked through the management API instead.
+
+  **OpenRouter expiration:** If `TFCONFIG.expires_at` is non-null, the Lambda requires that UTC timestamp to be in the future before writing an intent or calling Create, then passes it unchanged; the operator owns its lifetime. If it is null, the Lambda **does not** use an unspecified OpenRouter default. It requires Secrets Manager `RotationRules` with `rate(N hours)` or `rate(N days)`, or legacy `AutomaticallyAfterDays`, and derives `effective_expires_at` from the snapshot time: **now + rotation interval + window allowance + guard**. An explicit `Duration` must be `1h` through `23h`; absent `Duration` uses a one-hour window for hourly rates or a conservative 24-hour window for daily/legacy schedules. The guard is `max(2 hours, min(24 hours, 10% of interval))`. The Lambda stores `effective_expires_at` and `expiry_safety_seconds` (window allowance plus guard) in the token snapshot, and sends the effective expiration to OpenRouter Create. After Create, it checks the provider's management-key metadata for the requested name and effective expiration before writing `AWSPENDING`; a missing or differing expiration leaves the intent for reconciliation rather than saving an unverified key. `testSecret` and pre-promotion `finishSecret` reject a delayed rotation when a **derived** expiry no longer exceeds now plus that safety margin. A null expiry with missing, malformed, cron, or other unsupported rules fails before intent or provider creation; use an explicit `TFCONFIG.expires_at` for such schedules.
+
+  For a new target, attach both `AWSCURRENT` and `TFBOOTSTRAP` to one version containing `{"api_key":null,"api_key_id":"__CREATE_NEW__"}`. Only that exact value pair plus `TFBOOTSTRAP` triggers first-key creation. A migrated target may already have an active `AWSCURRENT` value with at least `api_key`, `api_key_id` (the OpenRouter hash), `name`, and `workspace_id`; it does not need `TFBOOTSTRAP`. Malformed half-sentinel payloads are rejected. Each new `AWSPENDING` and promoted `AWSCURRENT` credential version contains **only** those four fields. Its VersionId is `ClientRequestToken`; the AWS version ID is not the provider key hash.
+
+  Before the non-idempotent Create call, the Lambda writes a Lambda-owned `ROTATIONINTENT` version for the token, containing the pinned TFCONFIG version/values, predecessor version/key ID, and effective expiration. It reuses a durable `AWSPENDING` version on retry and removes the intent only **after** promotion, predecessor retirement, and pending-label cleanup. If Create may have succeeded but `AWSPENDING` was not saved, it fails closed instead of creating another key; plaintext cannot be recovered from OpenRouter. An operator must first abandon the old token's `AWSPENDING` stage, then explicitly invoke the Lambda with the custom (non-Secrets-Manager) `Step=reconcileOrphan`, `SecretId`, the old `ClientRequestToken`, `IntentVersionId`, and **exactly one** of `OrphanKeyId` (an operator-confirmed provider hash) or `NoKeyCreatedConfirmed=true` (operator confirmation that no provider key was created). With an ID, the Lambda rejects staged/current/predecessor key IDs and retires the confirmed orphan; without one, it performs no provider deletion. Both paths remove only `ROTATIONINTENT`, and a new rotation must use a new token. A matching name alone is not proof of orphan ownership. If neither outcome can be confirmed, leave the intent in place. Reconciliation works after rotation is disabled, but not after secret deletion is scheduled.
+
+  **Final-key decommissioning is outside this rotation contract.** Secrets Manager's four rotation steps provide no secret-deletion callback. The Lambda does not delete the final `AWSCURRENT` provider key when rotation is disabled, `TFCONFIG` is missing, or the secret is scheduled for deletion; these states fail closed without upstream mutation. Resolve final-key retirement separately before deleting the target secret, without treating a transient configuration gap as decommissioning.
+
+  In `finishSecret`, the persisted predecessor link must still match the AWS stages before promotion or retirement. The Lambda leaves `TFCONFIG`, `TFBOOTSTRAP`, and `AWSCURRENT` untouched when it removes only the promoted token's `AWSPENDING` label after old-key retirement. [AWS advises against a separate pending-label removal call](https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotate-secrets_lambda-functions.html), although [RotateSecret permits a successful version without `AWSPENDING`](https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_RotateSecret.html). Validate this module's requested cleanup with a real managed rotation and a subsequent rotation before production use.
+
+  Before upgrading, complete or reconcile any in-flight `AWSPENDING` version from the old contract; secret versions are immutable. The existing OpenRouter `AWSCURRENT` may keep its valid four credential fields, but its `api_key_id` must be the OpenRouter hash. For ordinary rotation, migrate existing OpenAI payloads to the exact six-field active credential after verifying key identity, and move creation settings to `TFCONFIG`. Alternatively, use the explicit version-pinned `CredentialHandoff` recovery above; incomplete legacy metadata requires an explicitly preserved predecessor, not guessed IDs. Do not guess provider IDs or identity from the Lambda environment. Serialize rotations and avoid concurrent manual stage changes; AWS staging and upstream API operations are not atomic. Key identifiers are not Terraform outputs. The Lambda's lifecycle logs contain identifiers, not plaintext keys, but DEBUG-level SDK logs may expose `SecretString`; use INFO or a less verbose log level and restrict log access. CloudWatch retention is controlled by `settings.log_retention_days`.
+
+  OpenAI validates admin-key plaintext against the admin-key list and project-key plaintext against [`GET /v1/models`](https://developers.openai.com/api/reference/resources/models/methods/list) only when the requested scope allows [`api.model.read`](https://developers.openai.com/api/docs/guides/rbac). Restricted project keys without that scope receive metadata-only management validation, not a plaintext proof. OpenRouter validation uses [`GET /api/v1/key`](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key) for enabled keys. OpenRouter [guardrail-policy assignments](https://openrouter.ai/docs/api/api-reference/guardrail-policies/get-an-api-key-policy-assignment) are separate from key-create settings and are not cloned by the Lambda.
+
+  OpenAI emits INFO logs for step start, actions, and successful completion. Use the Lambda request ID to follow one invocation. An OpenAI invocation also logs a SHA-256 correlation of the canonical secret ARN and rotation token. Failure diagnostics include only an allowlisted source-module filename and line number, never exception messages, locals, or full tracebacks. A management-secret rejection reports a fixed reason code, such as `organization_mismatch` or `organization_env_invalid`, without logging payloads or credentials. After removing `AWSPENDING`, OpenAI intent cleanup retries stage readback at most three times at one-second intervals to tolerate stale views. If stages do not converge or the exact current credential fails snapshot validation, the intent is retained for a same-token retry. Upstream failures emit a fixed HTTP-client reason (`http_status` or `transport_error`) and the numeric HTTP status when available; URLs, request headers, and provider response bodies are never logged.
+
+  API-key rotation also requires outbound HTTPS access to `api.openai.com` or `openrouter.ai`. If the Lambda is attached to private VPC subnets, provide NAT or equivalent egress.
 
 # Example usage
 examples: |-
@@ -210,6 +345,34 @@ examples: |-
     create_security_group: true
   ```
 
+  **OpenAI service-account key** — `management_api_key.secret_arn` accepts the name or ARN of an existing AWS secret containing an independent OpenAI admin key; the module does not create it. `openai.organization_id` binds requests to that organization. If the secret also declares `organization_id`, it must match. Put the existing project and service-account IDs, scopes, role, and lifetime in the target's `TFCONFIG` version, not in these inputs. The example scope allows the candidate plaintext validation call.
+
+  ```yaml
+  settings:
+    type: openai
+    multi_user: false
+    management_api_key:
+      secret_arn: app/openai-rotation-admin
+    openai:
+      organization_id: org_123
+    allowed_secrets:
+      - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/openai-workload-AbCdEf
+  ```
+
+  **OpenRouter key** — obtain a management key from the [OpenRouter dashboard](https://openrouter.ai/docs/guides/overview/auth/management-api-keys) and store it in an existing AWS secret. The module reads that secret but never provisions or changes it.
+
+  ```yaml
+  settings:
+    type: openrouter
+    multi_user: false
+    management_api_key:
+      secret_arn: arn:aws:secretsmanager:us-east-1:111122223333:secret:app/openrouter-rotation-management-AbCdEf
+    openrouter:
+      expires_at: "2027-01-01T00:00:00Z"
+    allowed_secrets:
+      - arn:aws:secretsmanager:us-east-1:111122223333:secret:app/openrouter-workload-AbCdEf
+  ```
+
 # How to get started quickly
 quickstart: |-
   1. Create and enter the target deployment directory:
@@ -222,8 +385,9 @@ quickstart: |-
      terragrunt scaffold github.com/cloudopsworks/terraform-module-aws-secrets-rotation-lambda-setup
      ```
   3. Answer the scaffold prompts (`vpc_module_enabled`, `vpc_module_path`, `vpc_subnet_type`) to configure VPC dependency injection.
-  4. Edit `inputs.yaml` — set `settings.type` to your database engine, configure `allowed_secrets` and `allowed_kms`, and adjust `vpc` settings if not using module injection.
+  4. Edit `inputs.yaml` — select a database engine, `openai`, or `openrouter`; configure `allowed_secrets` and `allowed_kms`, and adjust `vpc` settings if not using module injection.
   5. Run `terragrunt hcl fmt`, then `terragrunt plan` and `terragrunt apply` from the unit directory.
+  6. For API-key rotation, provide an existing populated management secret name or ARN, seed the separate target secret outside Terraform, then enable the target secret's rotation schedule. Confirm workload-key read scope and outbound HTTPS egress before the first rotation.
 
 include:
   - "docs/targets.md"
