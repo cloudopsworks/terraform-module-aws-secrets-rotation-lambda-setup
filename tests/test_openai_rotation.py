@@ -799,11 +799,45 @@ class OpenAIRotationTests(unittest.TestCase):
             self.rotate("createSecret")
         self.assertEqual([], self.calls)
 
-    def test_legacy_current_payload_is_rejected(self):
-        self.secrets.values["current"] = {"api_key": "sk-old", "api_key_id": "old-id",
-                                           "name": "old-name", "project_id": None}
-        self.secrets.stages["current"] = ["AWSCURRENT"]
-        with self.assertRaisesRegex(ValueError, "incomplete or legacy"):
+    def test_scheduled_rotation_replaces_legacy_current_as_unretired_orphan(self):
+        legacy_payloads = (
+            {"api_key": "sk-legacy-private"},
+            {"api_key": "sk-legacy-private", "api_key_id": "old-id",
+             "name": "old-name", "project_id": None},
+        )
+        for legacy in legacy_payloads:
+            with self.subTest(fields=sorted(legacy)):
+                self.setUp()
+                self.project(scopes=["api.model.read"], bootstrap=False)
+                self.secrets.values["current"] = dict(legacy)
+                with self.assertLogs(rotation.openai_rotation.LOG, level="INFO") as logs:
+                    for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
+                        self.rotate(step)
+                output = "\n".join(logs.output)
+                self.assertIn("adopt_legacy_predecessor_as_orphan", output)
+                self.assertIn("predecessor_retirement_deferred", output)
+                self.assertNotIn("sk-legacy-private", output)
+                self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+                self.assertEqual(["AWSPREVIOUS"], self.secrets.stages["current"])
+                self.assertEqual(legacy, self.secrets.values["current"])
+                self.assertEqual([], self.calls_for("DELETE"))
+                self.assertEqual(1, len(self.calls_for("POST")))
+                self.assertFalse(any("ROTATIONINTENT" in stages
+                                     for stages in self.secrets.stages.values()))
+
+    def test_module_shaped_but_invalid_current_still_fails_closed(self):
+        self.project(bootstrap=False)
+        self.secrets.values["current"] = self.credential(
+            "admin", "sk-old", "key_old", "old-name", "proj_123", "svc_456")
+        with self.assertRaisesRegex(ValueError, "Admin credential has project identity"):
+            self.rotate("createSecret")
+        self.assertEqual([], self.calls_for("POST"))
+        self.assertEqual([], self.secrets.put_calls)
+
+    def test_legacy_current_matching_management_key_is_still_rejected(self):
+        self.project(bootstrap=False)
+        self.secrets.values["current"] = {"api_key": "management-credential"}
+        with self.assertRaises(rotation.openai_rotation.OpenAIManagementSecretError):
             self.rotate("createSecret")
         self.assertEqual([], self.calls_for("POST"))
 
@@ -919,6 +953,57 @@ class OpenAIRotationTests(unittest.TestCase):
         self.assertEqual(self.new_id, self.calls_for("DELETE")[0][1].rsplit("/", 1)[-1])
         self.assertFalse(any("ROTATIONINTENT" in stages
                              for stages in self.secrets.stages.values()))
+
+    def start_next_rotation(self):
+        self.token = "next-token"
+        self.secrets.stages[self.token] = ["AWSPENDING"]
+        self.new_id, self.new_value = "key_next", "sk-next-workload"
+
+    def test_new_token_resumes_promoted_rotation_with_stranded_intent(self):
+        self.project(scopes=["api.model.read"])
+        self.rotate("createSecret")
+        original = self.secrets.update_secret_version_stage
+
+        def crash_before_intent_removal(**kwargs):
+            if kwargs["VersionStage"] == "ROTATIONINTENT":
+                raise RuntimeError("Lambda timeout before intent removal")
+            return original(**kwargs)
+
+        with patch.object(self.secrets, "update_secret_version_stage",
+                          side_effect=crash_before_intent_removal):
+            with self.assertRaisesRegex(RuntimeError, "intent removal"):
+                self.rotate("finishSecret")
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages["token-123456789"])
+        old_intent = self.intent()["intent_version_id"]
+        self.start_next_rotation()
+        self.rotate("createSecret")
+        self.assertNotIn("ROTATIONINTENT", self.secrets.stages[old_intent])
+        self.assertEqual("key_next", self.secrets.values[self.token]["api_key_id"])
+        self.assertEqual(self.token, self.intent()["token"])
+        deleted = [call[1].rsplit("/", 1)[-1] for call in self.calls_for("DELETE")]
+        self.assertEqual(["key_bootstrap", "key_bootstrap"], deleted)
+        self.assertEqual(2, len(self.calls_for("POST")))
+
+    def test_abandoned_saved_pending_blocks_new_token_until_reconciled(self):
+        self.rotate("createSecret")
+        intent_id = self.intent()["intent_version_id"]
+        self.secrets.stages[self.token].remove("AWSPENDING")
+        first_id = self.new_id
+        self.start_next_rotation()
+        with self.assertRaisesRegex(RuntimeError, "reconcile ROTATIONINTENT"):
+            self.rotate("createSecret")
+        self.assertEqual(1, len(self.calls_for("POST")))
+        self.token = "token-123456789"
+        for bad in ({"OrphanKeyId": "key_other"}, {"NoKeyCreatedConfirmed": True}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.rotate("reconcileOrphan", IntentVersionId=intent_id, **bad)
+        self.assertEqual([], self.calls_for("DELETE"))
+        self.rotate("reconcileOrphan", IntentVersionId=intent_id, OrphanKeyId=first_id)
+        self.assertEqual([first_id], [call[1].rsplit("/", 1)[-1] for call in self.calls_for("DELETE")])
+        self.assertNotIn("ROTATIONINTENT", self.secrets.stages[intent_id])
+        self.token = "next-token"
+        self.rotate("createSecret")
+        self.assertEqual("key_next", self.secrets.values[self.token]["api_key_id"])
 
     def test_decommissioned_or_deleting_secret_fails_safe(self):
         for attribute, value in (("rotation_enabled", False), ("deleted_date", self.now)):

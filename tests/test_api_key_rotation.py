@@ -454,6 +454,84 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
         self.assertIn("ROTATIONINTENT", self.secrets.stages[
             rotation.openrouter_rotation.intent_version(self.secrets.arn, "token-123456789")])
 
+    def next_rotation_provider(self):
+        original = self.provider
+
+        def provider(method, url, key, payload=None, **kwargs):
+            if method == "POST":
+                self.calls.append((method, url, key, payload))
+                self.provider_expiry = payload["expires_at"]
+                return {"key": "next-workload", "data": {"hash": "next-id", "workspace_id": None}}
+            return original(method, url, key, payload, **kwargs)
+
+        self.provider = provider
+
+    def test_new_token_resumes_promoted_rotation_with_stranded_intent(self):
+        for step in ("createSecret", "setSecret", "testSecret"):
+            self.rotate(step)
+        original = self.secrets.update_secret_version_stage
+
+        def crash_before_intent_removal(**kwargs):
+            if kwargs["VersionStage"] == "ROTATIONINTENT":
+                raise RuntimeError("Lambda timeout before intent removal")
+            return original(**kwargs)
+
+        with patch.object(self.secrets, "update_secret_version_stage",
+                          side_effect=crash_before_intent_removal):
+            with self.assertRaisesRegex(RuntimeError, "intent removal"):
+                self.rotate("finishSecret")
+        # Promotion and pending cleanup committed; only the intent is stranded.
+        self.assertEqual(self.secrets.stages["token-123456789"], ["AWSCURRENT"])
+        old_intent = rotation.openrouter_rotation.intent_version(self.secrets.arn, "token-123456789")
+        self.assertIn("ROTATIONINTENT", self.secrets.stages[old_intent])
+        self.next_rotation_provider()
+        self.event["ClientRequestToken"] = "next-token"
+        self.secrets.stages["next-token"] = ["AWSPENDING"]
+        self.rotate("createSecret")
+        self.assertNotIn("ROTATIONINTENT", self.secrets.stages[old_intent])
+        self.assertEqual(self.secrets.values["next-token"]["api_key_id"], "next-id")
+        self.assertEqual(self.intent_snapshot()["previous_api_key_id"], "new-id")
+        deleted = [call[1].rsplit("/", 1)[-1] for call in self.calls if call[0] == "DELETE"]
+        self.assertEqual(deleted, ["old-id", "old-id"])  # idempotent retirement replay only
+        self.assertEqual(sum(call[0] == "POST" for call in self.calls), 2)
+
+    def test_abandoned_saved_pending_blocks_new_token_until_reconciled(self):
+        self.rotate("createSecret")
+        intent = rotation.openrouter_rotation.intent_version(self.secrets.arn, "token-123456789")
+        self.secrets.stages["token-123456789"].remove("AWSPENDING")
+        self.next_rotation_provider()
+        next_event = {**self.event, "ClientRequestToken": "next-token"}
+        self.secrets.stages["next-token"] = ["AWSPENDING"]
+        with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
+            with self.assertRaisesRegex(RuntimeError, "reconcile ROTATIONINTENT"):
+                rotation.rotate(next_event, self.secrets)
+        self.assertEqual(sum(call[0] == "POST" for call in self.calls), 1)
+        with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
+            rotation.rotate(self.reconcile_event(intent, "new-id"), self.secrets)
+        deleted = [call[1].rsplit("/", 1)[-1] for call in self.calls if call[0] == "DELETE"]
+        self.assertEqual(deleted, ["new-id"])
+        self.assertNotIn("ROTATIONINTENT", self.secrets.stages[intent])
+        with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
+            rotation.rotate(next_event, self.secrets)
+        self.assertEqual(self.secrets.values["next-token"]["api_key_id"], "next-id")
+
+    def test_abandoned_saved_pending_reconciliation_requires_its_exact_key_id(self):
+        self.rotate("createSecret")
+        intent = rotation.openrouter_rotation.intent_version(self.secrets.arn, "token-123456789")
+        self.secrets.stages["token-123456789"].remove("AWSPENDING")
+        bad_events = (
+            self.reconcile_event(intent, "other-id"),
+            {key: value for key, value in self.reconcile_event(intent).items() if key != "OrphanKeyId"}
+            | {"NoKeyCreatedConfirmed": True},
+        )
+        for event in bad_events:
+            with self.subTest(event=event), \
+                 patch.object(openrouter_keys, "call_api", side_effect=self.provider):
+                with self.assertRaises(ValueError):
+                    rotation.rotate(event, self.secrets)
+        self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+        self.assertIn("ROTATIONINTENT", self.secrets.stages[intent])
+
     def test_legacy_pending_without_intent_fails_closed(self):
         self.rotate("createSecret")
         intent = self.intent_snapshot()["intent_version_id"]
