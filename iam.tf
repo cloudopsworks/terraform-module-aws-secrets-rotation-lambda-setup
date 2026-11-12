@@ -140,9 +140,12 @@ data "aws_iam_policy_document" "management_api_key" {
   count = local.api_key_rotation ? 1 : 0
 
   statement {
-    sid       = "ReadManagementApiKey"
-    effect    = "Allow"
-    actions   = ["secretsmanager:GetSecretValue"]
+    sid    = "ReadManagementApiKey"
+    effect = "Allow"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+    ]
     resources = [local.management_secret_arn]
   }
 }
@@ -189,7 +192,7 @@ data "aws_iam_policy_document" "allowed_kms" {
     ]
     resources = var.settings.allowed_kms
     condition {
-      test     = "StringEquals"
+      test     = "StringLike" # This allows for wildcards in the secret ARN, which is useful for multi-account deployments
       variable = "kms:EncryptionContext:SecretARN"
       values   = var.settings.allowed_secrets
     }
