@@ -333,11 +333,18 @@ def reconcile_orphan(secrets, metadata, event):
     if key_id is not None and key_id == intent["snapshot"]["previous_api_key_id"]:
         raise ValueError("Cannot reconcile the predecessor as an orphan")
     try:
-        read_json(secrets, arn, VersionId=token)
+        saved, _ = read_json(secrets, arn, VersionId=token)
     except secrets.exceptions.ResourceNotFoundException:
-        pass
-    else:
-        raise ValueError("Credential version exists; this is not an orphan")
+        saved = None
+    if saved is not None:
+        # An abandoned pending version records its own key hash. That is the
+        # strongest ownership evidence available, but the operator must still
+        # confirm the exact hash before it is revoked.
+        check_pending(saved, intent["snapshot"])
+        if no_key_created:
+            raise ValueError("Saved credential proves a key was created")
+        if key_id != saved["api_key_id"]:
+            raise ValueError("OrphanKeyId differs from the abandoned saved credential")
     if no_key_created:
         secrets.update_secret_version_stage(
             SecretId=arn, VersionStage=INTENT_STAGE, RemoveFromVersionId=intent_id,
@@ -349,7 +356,12 @@ def reconcile_orphan(secrets, metadata, event):
     for version_id, stages in metadata["VersionIdsToStages"].items():
         if not ({"AWSCURRENT", "AWSPENDING", "AWSPREVIOUS"} & set(stages)):
             continue
-        credential, _ = read_json(secrets, arn, VersionId=version_id)
+        try:
+            credential, _ = read_json(secrets, arn, VersionId=version_id)
+        except secrets.exceptions.ResourceNotFoundException:
+            # A new rotation's AWSPENDING placeholder has no value yet and
+            # therefore cannot reference any provider key.
+            continue
         if credential.get("api_key_id") == key_id:
             raise ValueError("Orphan key is referenced by a staged credential")
     admin_key = management_key(secrets)
@@ -367,6 +379,23 @@ def reconcile_orphan(secrets, metadata, event):
     LOG.info("openrouter_rotation orphan_retired secret_id=%s version_id=%s key_id=%s", arn, token, key_id)
 
 
+def resume_completed_intent(secrets, metadata, intent):
+    """Finish a promoted rotation whose cleanup was interrupted.
+
+    finishSecret removes AWSPENDING before ROTATIONINTENT. If it stops between
+    those calls, Secrets Manager starts the next rotation with a new token
+    while the old intent remains. Its token is already AWSCURRENT, so resuming
+    its finishSecret only repeats idempotent predecessor retirement and label
+    cleanup; no provider key is created. Any other intent is left in place.
+    """
+    old_token = intent["token"]
+    if "AWSCURRENT" not in metadata["VersionIdsToStages"].get(old_token, ()):
+        return intent
+    LOG.info("openrouter_rotation resume_completed_intent secret_id=%s version_id=%s", metadata["ARN"], old_token)
+    finish_secret(secrets, metadata, old_token)
+    return read_intent(secrets, metadata["ARN"])
+
+
 def create_secret(secrets, metadata, token):
     arn = metadata["ARN"]
     # Reuse a durable pending credential, but retain the intent snapshot
@@ -379,9 +408,13 @@ def create_secret(secrets, metadata, token):
         check_pending(pending, token_intent(secrets, arn, token)["snapshot"])
         return
     intent = read_intent(secrets, arn)
+    if intent is not None and intent["token"] != token:
+        intent = resume_completed_intent(secrets, metadata, intent)
     if intent is not None:
         if intent["token"] != token:
-            raise RuntimeError("Another OpenRouter rotation is unfinished")
+            LOG.error("openrouter_rotation orphan_reconciliation_required secret_id=%s version_id=%s intent_version_id=%s",
+                      arn, intent["token"], intent["intent_version_id"])
+            raise RuntimeError("Another OpenRouter rotation is unfinished; reconcile ROTATIONINTENT")
         LOG.error("openrouter_rotation orphan_reconciliation_required secret_id=%s version_id=%s", arn, token)
         raise RuntimeError("Possible orphaned OpenRouter key; reconcile ROTATIONINTENT")
     config, config_version_id = read_config(secrets, arn)

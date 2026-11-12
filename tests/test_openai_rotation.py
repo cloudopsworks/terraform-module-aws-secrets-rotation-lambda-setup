@@ -920,6 +920,57 @@ class OpenAIRotationTests(unittest.TestCase):
         self.assertFalse(any("ROTATIONINTENT" in stages
                              for stages in self.secrets.stages.values()))
 
+    def start_next_rotation(self):
+        self.token = "next-token"
+        self.secrets.stages[self.token] = ["AWSPENDING"]
+        self.new_id, self.new_value = "key_next", "sk-next-workload"
+
+    def test_new_token_resumes_promoted_rotation_with_stranded_intent(self):
+        self.project(scopes=["api.model.read"])
+        self.rotate("createSecret")
+        original = self.secrets.update_secret_version_stage
+
+        def crash_before_intent_removal(**kwargs):
+            if kwargs["VersionStage"] == "ROTATIONINTENT":
+                raise RuntimeError("Lambda timeout before intent removal")
+            return original(**kwargs)
+
+        with patch.object(self.secrets, "update_secret_version_stage",
+                          side_effect=crash_before_intent_removal):
+            with self.assertRaisesRegex(RuntimeError, "intent removal"):
+                self.rotate("finishSecret")
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages["token-123456789"])
+        old_intent = self.intent()["intent_version_id"]
+        self.start_next_rotation()
+        self.rotate("createSecret")
+        self.assertNotIn("ROTATIONINTENT", self.secrets.stages[old_intent])
+        self.assertEqual("key_next", self.secrets.values[self.token]["api_key_id"])
+        self.assertEqual(self.token, self.intent()["token"])
+        deleted = [call[1].rsplit("/", 1)[-1] for call in self.calls_for("DELETE")]
+        self.assertEqual(["key_bootstrap", "key_bootstrap"], deleted)
+        self.assertEqual(2, len(self.calls_for("POST")))
+
+    def test_abandoned_saved_pending_blocks_new_token_until_reconciled(self):
+        self.rotate("createSecret")
+        intent_id = self.intent()["intent_version_id"]
+        self.secrets.stages[self.token].remove("AWSPENDING")
+        first_id = self.new_id
+        self.start_next_rotation()
+        with self.assertRaisesRegex(RuntimeError, "reconcile ROTATIONINTENT"):
+            self.rotate("createSecret")
+        self.assertEqual(1, len(self.calls_for("POST")))
+        self.token = "token-123456789"
+        for bad in ({"OrphanKeyId": "key_other"}, {"NoKeyCreatedConfirmed": True}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.rotate("reconcileOrphan", IntentVersionId=intent_id, **bad)
+        self.assertEqual([], self.calls_for("DELETE"))
+        self.rotate("reconcileOrphan", IntentVersionId=intent_id, OrphanKeyId=first_id)
+        self.assertEqual([first_id], [call[1].rsplit("/", 1)[-1] for call in self.calls_for("DELETE")])
+        self.assertNotIn("ROTATIONINTENT", self.secrets.stages[intent_id])
+        self.token = "next-token"
+        self.rotate("createSecret")
+        self.assertEqual("key_next", self.secrets.values[self.token]["api_key_id"])
+
     def test_decommissioned_or_deleting_secret_fails_safe(self):
         for attribute, value in (("rotation_enabled", False), ("deleted_date", self.now)):
             with self.subTest(attribute=attribute):

@@ -415,6 +415,23 @@ def rotate(event, secrets):
     LOG.info("openai_rotation step=%s status=completed", step)
 
 
+def resume_completed_intent(secrets, metadata, intent):
+    """Finish a promoted rotation whose cleanup was interrupted.
+
+    finishSecret removes AWSPENDING before ROTATIONINTENT. If it stops between
+    those calls, Secrets Manager starts the next rotation with a new token
+    while the old intent remains. Its token is already AWSCURRENT, so resuming
+    its finishSecret only repeats idempotent predecessor retirement and label
+    cleanup; no provider key is created. Any other intent is left in place.
+    """
+    old_token = intent["token"]
+    if "AWSCURRENT" not in metadata["VersionIdsToStages"].get(old_token, ()):
+        return intent
+    LOG.info("openai_rotation action=resume_completed_intent")
+    finish_secret(secrets, metadata, old_token)
+    return read_intent(secrets, metadata["ARN"])
+
+
 def create_secret(secrets, metadata, event):
     arn, token = metadata["ARN"], event["ClientRequestToken"]
     LOG.info("openai_rotation action=check_existing_pending")
@@ -427,9 +444,13 @@ def create_secret(secrets, metadata, event):
         LOG.info("openai_rotation action=reuse_pending")
         return
     intent = read_intent(secrets, arn)
+    if intent is not None and intent["token"] != token:
+        intent = resume_completed_intent(secrets, metadata, intent)
     if intent is not None:
         if intent["token"] != token:
-            raise RuntimeError("Another OpenAI rotation is unfinished")
+            LOG.error("openai_rotation orphan_reconciliation_required secret_id=%s version_id=%s intent_version_id=%s",
+                      arn, intent["token"], intent["intent_version_id"])
+            raise RuntimeError("Another OpenAI rotation is unfinished; reconcile ROTATIONINTENT")
         LOG.error("openai_rotation orphan_reconciliation_required secret_id=%s version_id=%s", arn, token)
         raise RuntimeError("Possible orphaned OpenAI key; reconcile ROTATIONINTENT")
     LOG.info("openai_rotation action=read_configuration")
@@ -662,20 +683,33 @@ def reconcile_orphan(secrets, metadata, event):
     if {"AWSPENDING", "AWSCURRENT", "AWSPREVIOUS"} & set(
             metadata["VersionIdsToStages"].get(token, ())):
         raise ValueError("Abandon token stages before orphan reconciliation")
-    try:
-        read_json(secrets, arn, VersionId=token)
-    except secrets.exceptions.ResourceNotFoundException:
-        pass
-    else:
-        raise ValueError("Credential version exists; this is not an orphan")
     if key_id is not None and key_id == intent["snapshot"]["previous_api_key_id"]:
         raise ValueError("Cannot reconcile predecessor as orphan")
+    try:
+        saved, _ = read_json(secrets, arn, VersionId=token)
+    except secrets.exceptions.ResourceNotFoundException:
+        saved = None
+    if saved is not None:
+        # An abandoned pending version records its own key ID. That is the
+        # strongest ownership evidence available, but the operator must still
+        # confirm the exact ID before it is revoked.
+        LOG.info("openai_rotation action=check_abandoned_pending")
+        check_pending(saved, intent["snapshot"])
+        if no_key_created:
+            raise ValueError("Saved credential proves a key was created")
+        if key_id != saved["api_key_id"]:
+            raise ValueError("OrphanKeyId differs from the abandoned saved credential")
     if not no_key_created:
         LOG.info("openai_rotation action=verify_orphan_identity")
         for version_id, stages in metadata["VersionIdsToStages"].items():
             if not ({"AWSCURRENT", "AWSPENDING", "AWSPREVIOUS"} & set(stages)):
                 continue
-            credential, _ = read_json(secrets, arn, VersionId=version_id)
+            try:
+                credential, _ = read_json(secrets, arn, VersionId=version_id)
+            except secrets.exceptions.ResourceNotFoundException:
+                # A new rotation's AWSPENDING placeholder has no value yet and
+                # therefore cannot reference any provider key.
+                continue
             if credential.get("api_key_id") == key_id:
                 raise ValueError("Orphan ID is referenced by a staged credential")
         admin_key, organization_id = management_key(secrets, arn)
