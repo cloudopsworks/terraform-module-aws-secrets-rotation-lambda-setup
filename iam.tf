@@ -189,7 +189,7 @@ data "aws_iam_policy_document" "allowed_kms" {
     ]
     resources = var.settings.allowed_kms
     condition {
-      test     = "StringEquals"
+      test     = "StringLike" # This allows for wildcards in the secret ARN, which is useful for multi-account deployments
       variable = "kms:EncryptionContext:SecretARN"
       values   = var.settings.allowed_secrets
     }
