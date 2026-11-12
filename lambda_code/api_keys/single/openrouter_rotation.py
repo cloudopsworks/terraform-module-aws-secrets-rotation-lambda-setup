@@ -40,7 +40,10 @@ SNAPSHOT_FIELDS = frozenset({
     "previous_api_key_id", "intent_version_id", "effective_expires_at",
     "expiry_safety_seconds",
 })
+# Schema 2 pins a legacy predecessor by digest; it is replaced, never retired.
+LEGACY_SNAPSHOT_FIELDS = SNAPSHOT_FIELDS | {"previous_secret_sha256"}
 CREDENTIAL_FIELDS = frozenset({"api_key", "api_key_id", "name", "workspace_id"})
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 RATE_PATTERN = re.compile(r"^rate\((\d+) (hour|hours|day|days)\)$")
 DURATION_PATTERN = re.compile(r"^(\d+)h$")
 
@@ -189,9 +192,32 @@ def intent_version(arn, token):
     return hashlib.sha256(f"openrouter-intent:{arn}:{token}".encode("utf-8")).hexdigest()
 
 
+def secret_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def is_legacy_predecessor(value, stages):
+    """Recognize a pre-module credential: a usable key with no verifiable identity.
+
+    Such a key was never issued by this Lambda, so its hash cannot be trusted
+    for retirement. Rotation treats it as an orphaned predecessor (replaced,
+    not revoked) instead of failing forever. Values in the module's own
+    four-field shape, bootstrap sentinels, and TFBOOTSTRAP versions are never
+    legacy; they keep their strict validation.
+    """
+    if "TFBOOTSTRAP" in stages:
+        return False
+    key = value.get("api_key")
+    return (isinstance(key, str) and bool(key.strip()) and
+            value.get("api_key_id") != BOOTSTRAP_ID and set(value) != CREDENTIAL_FIELDS)
+
+
 def check_snapshot(snapshot, arn, token):
-    if (not isinstance(snapshot, dict) or set(snapshot) != SNAPSHOT_FIELDS or
-            type(snapshot["schema_version"]) is not int or snapshot["schema_version"] != 1 or
+    version = snapshot.get("schema_version") if isinstance(snapshot, dict) else None
+    fields = LEGACY_SNAPSHOT_FIELDS if version == 2 else SNAPSHOT_FIELDS
+    if (not isinstance(snapshot, dict) or set(snapshot) != fields or
+            type(version) is not int or version not in (1, 2) or
             not isinstance(snapshot["config_version_id"], str) or not snapshot["config_version_id"] or
             not isinstance(snapshot["previous_version_id"], str) or not snapshot["previous_version_id"] or
             snapshot["previous_version_id"] == token or
@@ -210,6 +236,9 @@ def check_snapshot(snapshot, arn, token):
     previous_id = snapshot["previous_api_key_id"]
     if previous_id is not None and (not isinstance(previous_id, str) or not previous_id or previous_id == BOOTSTRAP_ID):
         raise ValueError("Rotation predecessor identifier is invalid")
+    if version == 2 and (previous_id is not None or not isinstance(snapshot["previous_secret_sha256"], str) or
+                         not SHA256_PATTERN.match(snapshot["previous_secret_sha256"])):
+        raise ValueError("Legacy predecessor snapshot is invalid")
 
 
 def check_pending(value, snapshot):
@@ -421,8 +450,14 @@ def create_secret(secrets, metadata, token):
     expires_at, expiry_safety_seconds = effective_expiry(config, metadata)
     current, previous_version_id = read_json(secrets, arn, VersionStage="AWSCURRENT")
     previous_stages = metadata["VersionIdsToStages"].get(previous_version_id, ())
-    bootstrap = check_credential(current, bootstrap_allowed=True, stages=previous_stages)
-    previous_id = None if bootstrap else current["api_key_id"]
+    legacy = is_legacy_predecessor(current, previous_stages)
+    if legacy:
+        LOG.warning("openrouter_rotation adopt_legacy_predecessor_as_orphan secret_id=%s version_id=%s",
+                    arn, previous_version_id)
+        previous_id = None
+    else:
+        bootstrap = check_credential(current, bootstrap_allowed=True, stages=previous_stages)
+        previous_id = None if bootstrap else current["api_key_id"]
     snapshot = {
         "schema_version": 1, "config_version_id": config_version_id,
         "config": config, "previous_version_id": previous_version_id,
@@ -431,6 +466,8 @@ def create_secret(secrets, metadata, token):
         "effective_expires_at": expires_at,
         "expiry_safety_seconds": expiry_safety_seconds,
     }
+    if legacy:
+        snapshot.update({"schema_version": 2, "previous_secret_sha256": secret_digest(current)})
     intent = {
         "intent_version_id": snapshot["intent_version_id"], "secret_arn": arn,
         "token": token, "snapshot": snapshot, "owner_nonce": uuid.uuid4().hex,
@@ -536,11 +573,18 @@ def finish_secret(secrets, metadata, token):
     previous_id = snapshot["previous_version_id"]
     previous, _ = read_json(secrets, arn, VersionId=previous_id)
     previous_stages = metadata["VersionIdsToStages"].get(previous_id, ())
-    bootstrap = check_credential(previous, bootstrap_allowed=True, stages=previous_stages)
-    if previous.get("api_key_id") != (BOOTSTRAP_ID if bootstrap else snapshot["previous_api_key_id"]):
-        raise ValueError("Rotation predecessor differs from saved snapshot")
-    if bootstrap != (snapshot["previous_api_key_id"] is None):
-        raise ValueError("Rotation bootstrap snapshot is inconsistent")
+    legacy = snapshot["schema_version"] == 2
+    if legacy:
+        # The legacy value is pinned by digest because it has no trusted identity.
+        if secret_digest(previous) != snapshot["previous_secret_sha256"]:
+            raise ValueError("Legacy predecessor differs from saved snapshot")
+        bootstrap = False
+    else:
+        bootstrap = check_credential(previous, bootstrap_allowed=True, stages=previous_stages)
+        if previous.get("api_key_id") != (BOOTSTRAP_ID if bootstrap else snapshot["previous_api_key_id"]):
+            raise ValueError("Rotation predecessor differs from saved snapshot")
+        if bootstrap != (snapshot["previous_api_key_id"] is None):
+            raise ValueError("Rotation bootstrap snapshot is inconsistent")
     if not already_current:
         current, current_version = read_json(secrets, arn, VersionStage="AWSCURRENT")
         if current_version != previous_id or current != previous:
@@ -559,7 +603,9 @@ def finish_secret(secrets, metadata, token):
     current, current_version = read_json(secrets, arn, VersionStage="AWSCURRENT")
     if current_version != token or current != pending:
         raise ValueError("Promoted credential differs from saved pending version")
-    if not bootstrap:
+    if legacy:
+        LOG.warning("openrouter_rotation predecessor_retirement_deferred secret_id=%s version_id=%s", arn, previous_id)
+    elif not bootstrap:
         openrouter_keys.delete_key(management_key(secrets), snapshot["previous_api_key_id"])
         LOG.info("openrouter_rotation retired secret_id=%s version_id=%s key_id=%s", arn, previous_id, snapshot["previous_api_key_id"])
     # The previous request explicitly requires AWSPENDING cleanup. Only the

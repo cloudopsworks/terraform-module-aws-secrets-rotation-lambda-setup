@@ -532,6 +532,53 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
         self.assertIn("ROTATIONINTENT", self.secrets.stages[intent])
 
+    def test_legacy_current_without_bootstrap_is_replaced_as_unretired_orphan(self):
+        legacy_payloads = (
+            {"api_key": "sk-or-legacy-private"},
+            {"api_key": "sk-or-legacy-private", "api_key_id": "legacy-hash"},
+        )
+        for legacy in legacy_payloads:
+            with self.subTest(fields=sorted(legacy)):
+                self.setUp()
+                self.secrets.values["current"] = dict(legacy)
+                self.assertFalse(any("TFBOOTSTRAP" in stages for stages in self.secrets.stages.values()))
+                with self.assertLogs(rotation.openrouter_rotation.LOG, level="INFO") as logs:
+                    self.rotate("createSecret")
+                    snapshot = self.intent_snapshot()
+                    for step in ("setSecret", "testSecret", "finishSecret"):
+                        self.rotate(step)
+                output = "\n".join(logs.output)
+                self.assertEqual(2, snapshot["schema_version"])
+                self.assertIsNone(snapshot["previous_api_key_id"])
+                self.assertIn("adopt_legacy_predecessor_as_orphan", output)
+                self.assertIn("predecessor_retirement_deferred", output)
+                self.assertNotIn("sk-or-legacy-private", output)
+                self.assertEqual(["AWSCURRENT"], self.secrets.stages["token-123456789"])
+                self.assertEqual(["AWSPREVIOUS"], self.secrets.stages["current"])
+                self.assertEqual(legacy, self.secrets.values["current"])
+                self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+                self.assertEqual(1, sum(call[0] == "POST" for call in self.calls))
+                self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+
+    def test_legacy_predecessor_change_blocks_promotion(self):
+        self.secrets.values["current"] = {"api_key": "sk-or-legacy-private"}
+        self.rotate("createSecret")
+        self.secrets.values["current"] = {"api_key": "sk-or-swapped"}
+        with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
+            with self.assertRaisesRegex(ValueError, "Legacy predecessor differs"):
+                rotation.rotate({**self.event, "Step": "finishSecret"}, self.secrets)
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages["current"])
+        self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+
+    def test_module_shaped_but_invalid_current_still_fails_closed(self):
+        self.secrets.values["current"] = {"api_key": "sk-or-old", "api_key_id": "old-id",
+                                          "name": "", "workspace_id": None}
+        with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                rotation.rotate(self.event, self.secrets)
+        self.assertEqual([], self.secrets.put_calls)
+        self.assertEqual([], self.calls)
+
     def test_legacy_pending_without_intent_fails_closed(self):
         self.rotate("createSecret")
         intent = self.intent_snapshot()["intent_version_id"]
