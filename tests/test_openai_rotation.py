@@ -954,6 +954,32 @@ class OpenAIRotationTests(unittest.TestCase):
         self.assertFalse(any("ROTATIONINTENT" in stages
                              for stages in self.secrets.stages.values()))
 
+    def test_stale_current_read_after_promotion_is_retried(self):
+        self.project(scopes=["api.model.read"])
+        self.rotate("createSecret")
+        original_get = self.secrets.get_secret_value
+        original_update = self.secrets.update_secret_version_stage
+        state = {"promoted": False, "left": 2}
+
+        def update(**kwargs):
+            original_update(**kwargs)
+            if "MoveToVersionId" in kwargs:
+                state["promoted"] = True
+
+        def get(SecretId, VersionId=None, VersionStage=None):
+            if state["promoted"] and VersionStage == "AWSCURRENT" and not VersionId and state["left"]:
+                state["left"] -= 1
+                return {"SecretString": json.dumps(self.secrets.values["current"]), "VersionId": "current"}
+            return original_get(SecretId=SecretId, VersionId=VersionId, VersionStage=VersionStage)
+
+        with patch.multiple(self.secrets, get_secret_value=get, update_secret_version_stage=update), \
+                patch.object(rotation.openai_rotation.time, "sleep") as sleep:
+            self.rotate("finishSecret")
+        self.assertEqual(2, sleep.call_count)
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+        self.assertEqual(["key_bootstrap"], [call[1].rsplit("/", 1)[-1] for call in self.calls_for("DELETE")])
+        self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+
     def start_next_rotation(self):
         self.token = "next-token"
         self.secrets.stages[self.token] = ["AWSPENDING"]

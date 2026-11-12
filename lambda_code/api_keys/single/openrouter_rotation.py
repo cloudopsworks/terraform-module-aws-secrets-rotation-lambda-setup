@@ -44,6 +44,8 @@ SNAPSHOT_FIELDS = frozenset({
 LEGACY_SNAPSHOT_FIELDS = SNAPSHOT_FIELDS | {"previous_secret_sha256"}
 CREDENTIAL_FIELDS = frozenset({"api_key", "api_key_id", "name", "workspace_id"})
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+STAGE_READBACK_ATTEMPTS = 3
+STAGE_READBACK_DELAY_SECONDS = 1
 RATE_PATTERN = re.compile(r"^rate\((\d+) (hour|hours|day|days)\)$")
 DURATION_PATTERN = re.compile(r"^(\d+)h$")
 
@@ -552,6 +554,24 @@ def test_secret(secrets, arn, token):
         openrouter_keys.validate_key(pending["api_key"])
 
 
+def read_promoted_current(secrets, arn, token):
+    """Read AWSCURRENT after promotion, tolerating a briefly stale stage read.
+
+    UpdateSecretVersionStage commits before every GetSecretValue path sees it,
+    so a stage-addressed read can still return the predecessor for a moment.
+    Only the promoted token is accepted; anything else fails closed after the
+    retries, before any predecessor is retired.
+    """
+    for attempt in range(STAGE_READBACK_ATTEMPTS):
+        current, current_version = read_json(secrets, arn, VersionStage="AWSCURRENT")
+        if current_version == token:
+            return current
+        if attempt < STAGE_READBACK_ATTEMPTS - 1:
+            LOG.info("openrouter_rotation wait_for_current_readback secret_id=%s version_id=%s", arn, token)
+            time.sleep(STAGE_READBACK_DELAY_SECONDS)
+    raise ValueError("Promoted credential differs from saved pending version")
+
+
 def finish_secret(secrets, metadata, token):
     arn = metadata["ARN"]
     already_current = "AWSCURRENT" in metadata["VersionIdsToStages"].get(token, ())
@@ -600,8 +620,8 @@ def finish_secret(secrets, metadata, token):
     stages = secrets.describe_secret(SecretId=arn)["VersionIdsToStages"]
     if "AWSCURRENT" not in stages.get(token, ()) or "AWSPREVIOUS" not in stages.get(previous_id, ()):
         raise ValueError("Rotation stages changed before predecessor retirement")
-    current, current_version = read_json(secrets, arn, VersionStage="AWSCURRENT")
-    if current_version != token or current != pending:
+    current = read_promoted_current(secrets, arn, token)
+    if current != pending:
         raise ValueError("Promoted credential differs from saved pending version")
     if legacy:
         LOG.warning("openrouter_rotation predecessor_retirement_deferred secret_id=%s version_id=%s", arn, previous_id)
