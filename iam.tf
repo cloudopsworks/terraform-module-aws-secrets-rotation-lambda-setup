@@ -140,9 +140,12 @@ data "aws_iam_policy_document" "management_api_key" {
   count = local.api_key_rotation ? 1 : 0
 
   statement {
-    sid       = "ReadManagementApiKey"
-    effect    = "Allow"
-    actions   = ["secretsmanager:GetSecretValue"]
+    sid    = "ReadManagementApiKey"
+    effect = "Allow"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+    ]
     resources = [local.management_secret_arn]
   }
 }
