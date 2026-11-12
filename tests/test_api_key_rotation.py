@@ -532,6 +532,101 @@ class OpenRouterConfigRotationTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
         self.assertIn("ROTATIONINTENT", self.secrets.stages[intent])
 
+    def stale_current_reads(self, stale_reads):
+        """Make the first AWSCURRENT reads after promotion return the predecessor."""
+        original = self.secrets.get_secret_value
+        state = {"promoted": False, "left": stale_reads}
+        original_update = self.secrets.update_secret_version_stage
+
+        def update(**kwargs):
+            original_update(**kwargs)
+            if "MoveToVersionId" in kwargs:
+                state["promoted"], state["previous"] = True, kwargs["RemoveFromVersionId"]
+
+        def get(SecretId, VersionId=None, VersionStage=None):
+            if state["promoted"] and VersionStage == "AWSCURRENT" and not VersionId and state["left"]:
+                state["left"] -= 1
+                previous = state["previous"]
+                return {"SecretString": json.dumps(self.secrets.values[previous]), "VersionId": previous}
+            return original(SecretId=SecretId, VersionId=VersionId, VersionStage=VersionStage)
+
+        return patch.multiple(self.secrets, get_secret_value=get, update_secret_version_stage=update)
+
+    def test_stale_current_read_after_promotion_is_retried(self):
+        for step in ("createSecret", "setSecret", "testSecret"):
+            self.rotate(step)
+        with self.stale_current_reads(2), \
+             patch.object(rotation.openrouter_rotation.time, "sleep") as sleep:
+            self.rotate("finishSecret")
+        self.assertEqual(2, sleep.call_count)
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages["token-123456789"])
+        deleted = [call[1].rsplit("/", 1)[-1] for call in self.calls if call[0] == "DELETE"]
+        self.assertEqual(["old-id"], deleted)
+        self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+
+    def test_persistently_stale_current_fails_closed_then_finish_retry_completes(self):
+        for step in ("createSecret", "setSecret", "testSecret"):
+            self.rotate(step)
+        with self.stale_current_reads(99), \
+             patch.object(rotation.openrouter_rotation.time, "sleep"):
+            with self.assertRaisesRegex(ValueError, "Promoted credential differs"):
+                self.rotate("finishSecret")
+        # Promotion committed, but nothing was retired and the intent survives.
+        self.assertIn("AWSCURRENT", self.secrets.stages["token-123456789"])
+        self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+        self.assertTrue(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+        self.rotate("finishSecret")
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages["token-123456789"])
+        self.assertEqual(1, sum(call[0] == "DELETE" for call in self.calls))
+        self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+
+    def test_legacy_current_without_bootstrap_is_replaced_as_unretired_orphan(self):
+        legacy_payloads = (
+            {"api_key": "sk-or-legacy-private"},
+            {"api_key": "sk-or-legacy-private", "api_key_id": "legacy-hash"},
+        )
+        for legacy in legacy_payloads:
+            with self.subTest(fields=sorted(legacy)):
+                self.setUp()
+                self.secrets.values["current"] = dict(legacy)
+                self.assertFalse(any("TFBOOTSTRAP" in stages for stages in self.secrets.stages.values()))
+                with self.assertLogs(rotation.openrouter_rotation.LOG, level="INFO") as logs:
+                    self.rotate("createSecret")
+                    snapshot = self.intent_snapshot()
+                    for step in ("setSecret", "testSecret", "finishSecret"):
+                        self.rotate(step)
+                output = "\n".join(logs.output)
+                self.assertEqual(2, snapshot["schema_version"])
+                self.assertIsNone(snapshot["previous_api_key_id"])
+                self.assertIn("adopt_legacy_predecessor_as_orphan", output)
+                self.assertIn("predecessor_retirement_deferred", output)
+                self.assertNotIn("sk-or-legacy-private", output)
+                self.assertEqual(["AWSCURRENT"], self.secrets.stages["token-123456789"])
+                self.assertEqual(["AWSPREVIOUS"], self.secrets.stages["current"])
+                self.assertEqual(legacy, self.secrets.values["current"])
+                self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+                self.assertEqual(1, sum(call[0] == "POST" for call in self.calls))
+                self.assertFalse(any("ROTATIONINTENT" in stages for stages in self.secrets.stages.values()))
+
+    def test_legacy_predecessor_change_blocks_promotion(self):
+        self.secrets.values["current"] = {"api_key": "sk-or-legacy-private"}
+        self.rotate("createSecret")
+        self.secrets.values["current"] = {"api_key": "sk-or-swapped"}
+        with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
+            with self.assertRaisesRegex(ValueError, "Legacy predecessor differs"):
+                rotation.rotate({**self.event, "Step": "finishSecret"}, self.secrets)
+        self.assertEqual(["AWSCURRENT"], self.secrets.stages["current"])
+        self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+
+    def test_module_shaped_but_invalid_current_still_fails_closed(self):
+        self.secrets.values["current"] = {"api_key": "sk-or-old", "api_key_id": "old-id",
+                                          "name": "", "workspace_id": None}
+        with patch.object(openrouter_keys, "call_api", side_effect=self.provider):
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                rotation.rotate(self.event, self.secrets)
+        self.assertEqual([], self.secrets.put_calls)
+        self.assertEqual([], self.calls)
+
     def test_legacy_pending_without_intent_fails_closed(self):
         self.rotate("createSecret")
         intent = self.intent_snapshot()["intent_version_id"]
