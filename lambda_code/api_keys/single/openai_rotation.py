@@ -253,6 +253,22 @@ def check_handoff_event(event):
     return handoff
 
 
+def is_legacy_predecessor(value, stages):
+    """Recognize a pre-module credential: a usable key with no verifiable identity.
+
+    Such a key was never issued by this Lambda, so its provider ID cannot be
+    trusted for retirement. A scheduled rotation treats it as an orphaned
+    predecessor (replaced, not revoked) instead of failing forever. Values in
+    the module's own six-field shape, bootstrap sentinels, and TFBOOTSTRAP
+    versions are never legacy; they keep their strict validation.
+    """
+    if not isinstance(value, dict) or "TFBOOTSTRAP" in stages:
+        return False
+    key = value.get("api_key")
+    return (isinstance(key, str) and bool(key.strip()) and
+            value.get("api_key_id") != BOOTSTRAP_ID and set(value) != CREDENTIAL_FIELDS)
+
+
 def check_snapshot(snapshot, arn, token):
     version = snapshot.get("schema_version") if isinstance(snapshot, dict) else None
     fields = HANDOFF_SNAPSHOT_FIELDS if version == 2 else SNAPSHOT_FIELDS
@@ -458,6 +474,13 @@ def create_secret(secrets, metadata, event):
     current, previous_version_id = read_json(secrets, arn, VersionStage="AWSCURRENT")
     stages = metadata["VersionIdsToStages"].get(previous_version_id, ())
     handoff = check_handoff_event(event)
+    if handoff is None and is_legacy_predecessor(current, stages):
+        # Scheduled rotations cannot carry CredentialHandoff. Apply the same
+        # non-retiring handoff so the legacy key is replaced and left for
+        # separately verified revocation.
+        LOG.warning("openai_rotation action=adopt_legacy_predecessor_as_orphan secret_id=%s version_id=%s",
+                    arn, previous_version_id)
+        handoff = {"PreviousVersionId": previous_version_id, "RetirePreviousKey": False}
     if handoff is not None:
         if previous_version_id != handoff["PreviousVersionId"]:
             raise ValueError("CredentialHandoff predecessor changed")

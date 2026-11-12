@@ -799,11 +799,45 @@ class OpenAIRotationTests(unittest.TestCase):
             self.rotate("createSecret")
         self.assertEqual([], self.calls)
 
-    def test_legacy_current_payload_is_rejected(self):
-        self.secrets.values["current"] = {"api_key": "sk-old", "api_key_id": "old-id",
-                                           "name": "old-name", "project_id": None}
-        self.secrets.stages["current"] = ["AWSCURRENT"]
-        with self.assertRaisesRegex(ValueError, "incomplete or legacy"):
+    def test_scheduled_rotation_replaces_legacy_current_as_unretired_orphan(self):
+        legacy_payloads = (
+            {"api_key": "sk-legacy-private"},
+            {"api_key": "sk-legacy-private", "api_key_id": "old-id",
+             "name": "old-name", "project_id": None},
+        )
+        for legacy in legacy_payloads:
+            with self.subTest(fields=sorted(legacy)):
+                self.setUp()
+                self.project(scopes=["api.model.read"], bootstrap=False)
+                self.secrets.values["current"] = dict(legacy)
+                with self.assertLogs(rotation.openai_rotation.LOG, level="INFO") as logs:
+                    for step in ("createSecret", "setSecret", "testSecret", "finishSecret"):
+                        self.rotate(step)
+                output = "\n".join(logs.output)
+                self.assertIn("adopt_legacy_predecessor_as_orphan", output)
+                self.assertIn("predecessor_retirement_deferred", output)
+                self.assertNotIn("sk-legacy-private", output)
+                self.assertEqual(["AWSCURRENT"], self.secrets.stages[self.token])
+                self.assertEqual(["AWSPREVIOUS"], self.secrets.stages["current"])
+                self.assertEqual(legacy, self.secrets.values["current"])
+                self.assertEqual([], self.calls_for("DELETE"))
+                self.assertEqual(1, len(self.calls_for("POST")))
+                self.assertFalse(any("ROTATIONINTENT" in stages
+                                     for stages in self.secrets.stages.values()))
+
+    def test_module_shaped_but_invalid_current_still_fails_closed(self):
+        self.project(bootstrap=False)
+        self.secrets.values["current"] = self.credential(
+            "admin", "sk-old", "key_old", "old-name", "proj_123", "svc_456")
+        with self.assertRaisesRegex(ValueError, "Admin credential has project identity"):
+            self.rotate("createSecret")
+        self.assertEqual([], self.calls_for("POST"))
+        self.assertEqual([], self.secrets.put_calls)
+
+    def test_legacy_current_matching_management_key_is_still_rejected(self):
+        self.project(bootstrap=False)
+        self.secrets.values["current"] = {"api_key": "management-credential"}
+        with self.assertRaises(rotation.openai_rotation.OpenAIManagementSecretError):
             self.rotate("createSecret")
         self.assertEqual([], self.calls_for("POST"))
 
