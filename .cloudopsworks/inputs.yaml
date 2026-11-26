@@ -12,3 +12,10 @@
 #
 #semgrep:
 #  enabled: true | false # Defaults to true, set to false to disable
+#
+# Module tests (blueprint ci/terraform/test), run by .github/workflows/module-tests.yml on pull request open/update
+#tests:
+#  enabled: true | false # Defaults to true, set to false to disable
+#  engine: tofu | terraform # Defaults to tofu
+#  version: "latest" # Defaults to latest, accepts an exact version (e.g. "1.11.4") or a constraint
+#  directory: "tests" # Defaults to tests, directory holding *.tftest.hcl / *.tofutest.hcl files

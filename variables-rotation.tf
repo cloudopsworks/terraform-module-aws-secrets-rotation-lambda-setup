@@ -14,6 +14,7 @@
 #   multi_user: true | false      # (Optional) Enable alternating-users rotation strategy. Default: false. Must be false for API-key types.
 #   timeout: 60                   # (Optional) Lambda timeout in seconds. Default: 60.
 #   memory_size: 128              # (Optional) Lambda memory size in MB. Default: 128.
+#   python_version: "3.15"        # (Optional) Python Lambda runtime and wheel ABI for Python-based types. Valid values: "3.12", "3.13", "3.14", "3.15". Default: "3.15". Quote it in YAML. Ignored for mongodbatlas (Go on provided.al2023).
 #   password_length: 30           # (Optional) Generated password length. Default: 30. Must be >= 24.
 #   log_retention_days: 14        # (Optional) CloudWatch Logs retention in days. Default: 14.
 #   logging:                      # (Optional) Lambda advanced logging configuration.
@@ -77,6 +78,16 @@ variable "settings" {
   validation {
     condition     = !contains(["openai", "openrouter"], try(var.settings.type, "")) || try(var.settings.management_api_key.kms_key_arn, null) == null
     error_message = "settings.management_api_key.kms_key_arn is not supported; the module resolves the management secret's KMS key automatically."
+  }
+
+  validation {
+    condition     = contains(["postgres", "mysql", "mariadb", "mssql", "mongodb", "mongodbatlas", "oracle", "db2", "openai", "openrouter"], try(var.settings.type, ""))
+    error_message = "settings.type must be one of postgres, mysql, mariadb, mssql, mongodb, mongodbatlas, oracle, db2, openai or openrouter."
+  }
+
+  validation {
+    condition     = try(var.settings.type, "") == "mongodbatlas" || contains(["3.12", "3.13", "3.14", "3.15"], try(tostring(coalesce(try(var.settings.python_version, null), "3.15")), ""))
+    error_message = "settings.python_version must be one of \"3.12\", \"3.13\", \"3.14\" or \"3.15\" (Amazon Linux 2023 Python Lambda runtimes)."
   }
 
   validation {

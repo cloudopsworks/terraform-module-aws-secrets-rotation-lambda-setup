@@ -46,6 +46,24 @@ We have [*lots of terraform modules*][terraform_modules] that are Open Source an
 
 This module creates the AWS Lambda function, execution role, CloudWatch log group, optional VPC networking, and supporting IAM policies required to run Secrets Manager rotation workflows. Database integrations use engine-specific dependencies and may support single-user or alternating-users patterns. OpenAI and OpenRouter API-key rotation is single-user only. For those integrations, supply an existing AWS Secrets Manager secret containing the upstream management credential by name or ARN. The module resolves its ARN and KMS key, injects the ARN into the Lambda environment, and grants read access; it does not create, populate, or manage that secret or its plaintext value. The rotated workload-key secret and its rotation schedule are managed separately.
 
+### Lambda runtimes and build host requirements
+
+The deployment package is built on the machine running Terragrunt, then zipped and uploaded.
+
+| Rotation type | Lambda runtime | Build step on the Terragrunt host |
+|---------------|----------------|-----------------------------------|
+| `postgres`, `mysql`, `mariadb`, `mssql` | `python3.15` by default; select `3.12`–`3.15` with `settings.python_version` | `pip3 install` of `cp<version>` x86_64 binary wheels (`manylinux_2_28` or `manylinux2014`) |
+| `openai`, `openrouter` | `python3.15` by default; select `3.12`–`3.15` with `settings.python_version` | None (standard library only) |
+| `mongodbatlas` | `provided.al2023` (OS-only runtime) | `go build` of a static `linux/amd64` `bootstrap` binary (`CGO_ENABLED=0`, `-tags lambda.norpc`); requires Go 1.27 or newer, or `GOTOOLCHAIN=auto` |
+
+Types without bundled Lambda source (`mongodb`, `oracle`, `db2`, and any `multi_user: true` combination) fail at plan time instead of deploying a function that cannot import its handler.
+
+All supported runtimes run on Amazon Linux 2023. Changing `settings.python_version` changes the package hash, so the next apply rebuilds the dependencies for the new ABI and re-uploads the package together with the runtime change. The module requires AWS provider `~> 6.58`, the first release that accepts `python3.15`.
+
+**Upgrading from releases that used `python3.12`.** Python-based functions move to `python3.15` on the next apply, and every function re-uploads its package once because the package hash formula changed. The AWS provider may update the runtime before the code, so a rotation that fires during the apply can briefly fail with a missing-module import error. Apply outside your rotation window, or set `settings.python_version: "3.12"` to keep the previous runtime. Confirm that `python3.15` is available in your target regions first.
+
+**Build safety in CI pipelines.** Inputs never reach the build shell by string interpolation: `settings.type` and `settings.python_version` are validated against fixed allowlists, and paths and versions are passed to `local-exec` as quoted environment variables. pip runs with `--only-binary=:all:`, so no package build scripts execute on the runner. The package is staged at `<root module>/.terraform/lambda-build/<hash>.zip`, which is private to the unit and unique per function, instead of the shared, world-writable `/tmp`. Parallel `terragrunt run-all` units therefore never overwrite each other's archive, and other jobs on a shared runner cannot swap it before upload. Python dependencies are not version-pinned: each build installs the latest matching release, but a new upload is triggered only when the bundled source or the runtime changes. Point pip at a trusted index (`PIP_INDEX_URL`) if your pipeline requires vetted dependencies.
+
 ## Usage
 
 
@@ -172,6 +190,7 @@ settings:
   multi_user: false # (Optional) Enable alternating-users rotation strategy. Default: false. Must be false for API-key types.
   timeout: 60 # (Optional) Lambda timeout in seconds. Default: 60.
   memory_size: 128 # (Optional) Lambda memory size in MB. Default: 128.
+  python_version: "3.15" # (Optional) Python Lambda runtime (python<version>) and wheel ABI for Python-based types. Valid values: "3.12", "3.13", "3.14", "3.15". Default: "3.15". Quote the value so YAML keeps it a string. Ignored for mongodbatlas, which builds a static Go binary for provided.al2023.
   password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
   # For type: openai or openrouter, supply a pre-existing AWS Secrets Manager management secret.
   # OpenAI accepts JSON {"api_key":"<admin management key>"}; organization_id is optional and must match the configured ID if present.
@@ -362,6 +381,7 @@ settings:
   multi_user: true
   timeout: 120
   memory_size: 256
+  python_version: "3.15"
   password_length: 32
   log_retention_days: 30
   logging:
@@ -435,13 +455,13 @@ Available targets:
 | Name | Version |
 | ---- | ------- |
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3 |
-| <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.35 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.58 |
 
 ## Providers
 
 | Name | Version |
 | ---- | ------- |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.35 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.58 |
 | <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
 
 ## Modules

@@ -77,6 +77,13 @@ This document provides instructions for AI Agents working with the implementatio
   - Formatting: `tronador project format` (alias `tronador project fmt`)
   - Validation & Linting: `tronador project lint` (alias `tronador project validate`)
   - Both accept `--workdir <dir>`, `--json`, `--dry-run`, and `--engine tofu|terraform|auto`. Run `tronador project capabilities` to list what the detected implementation supports.
+- **Module Tests**:
+  - Put native test files (`*.tftest.hcl`, `*.tftest.json`, or OpenTofu-only `*.tofutest.hcl`) under `./tests` at the module root. Each `.tf` helper module inside `tests/` must carry the mandatory copyright header.
+  - `.github/workflows/module-tests.yml` calls the `cloudopsworks/blueprints` `ci/terraform/test` action, which runs `init -backend=false -test-directory=tests` and then `test -test-directory=tests` every time a pull request is opened, updated, or reopened. It skips when the repository has no `versions.tf` (an uninitialized template) or no test files.
+  - CI provides no cloud credentials, so tests that run in CI must use `command = plan` with `mock_provider` / `override_*` blocks. Keep `command = apply` tests for local runs against a real target.
+  - Supply every required root variable (for example `org`) through `variables {}` blocks in the test file.
+  - Run locally before pushing: `tofu init -backend=false -test-directory=tests && tofu test -test-directory=tests`.
+  - Tune the job through the optional `tests` block in `.cloudopsworks/inputs.yaml`: `enabled`, `engine` (`tofu` default, or `terraform`), `version` (`latest` default), and `directory` (`tests` default).
 - **Repository Management**
   - Use process as described in the contributing guidelines: [GitHub Flow](https://cloudopsworks.co/resources/githubflow-way-of-work/)
 
