@@ -8,6 +8,7 @@ settings:
   multi_user: false # (Optional) Enable alternating-users rotation strategy. Default: false. Must be false for API-key types.
   timeout: 60 # (Optional) Lambda timeout in seconds. Default: 60.
   memory_size: 128 # (Optional) Lambda memory size in MB. Default: 128.
+  python_version: "3.15" # (Optional) Python Lambda runtime (python<version>) and wheel ABI for Python-based types. Valid values: "3.12", "3.13", "3.14", "3.15". Default: "3.15". Quote the value so YAML keeps it a string. Ignored for mongodbatlas, which builds a static Go binary for provided.al2023.
   password_length: 30 # (Optional) Generated password length. Default: 30. Use values >= 24.
   # For type: openai or openrouter, supply a pre-existing AWS Secrets Manager management secret.
   # OpenAI accepts JSON {"api_key":"<admin management key>"}; organization_id is optional and must match the configured ID if present.

@@ -12,8 +12,13 @@ locals {
   management_secret_id  = try(trimspace(var.settings.management_api_key.secret_arn), null)
   management_secret_arn = local.api_key_rotation ? data.aws_secretsmanager_secret.management_api_key[0].arn : null
   multi_user            = try(var.settings.multi_user, false)
-  function_name         = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
-  function_name_short   = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
+  golang_build          = local.pip_map[var.settings.type] == "[golang]"
+  python_version        = tostring(coalesce(try(var.settings.python_version, null), "3.15"))
+  lambda_runtime        = local.golang_build ? "provided.al2023" : "python${local.python_version}"
+  # AL2023-based runtimes ship glibc 2.34, so both legacy manylinux2014 and newer manylinux_2_28 wheels load.
+  pip_platforms       = ["manylinux_2_28_x86_64", "manylinux2014_x86_64"]
+  function_name       = "secrets-rotation-${var.settings.type}-${local.system_name}${local.multi_user == true ? "-multiuser" : ""}"
+  function_name_short = "secrets-rotation-${var.settings.type}-${local.system_name_short}${local.multi_user == true ? "-mu" : ""}"
   pip_map = {
     postgres     = "\"psycopg[binary]\" typing_extensions"
     mysql        = "PyMySQL"
@@ -45,10 +50,13 @@ locals {
   )
   source_root = local.api_key_rotation ? "lambda_code/api_keys/single" : "lambda_code/${var.settings.type}/${local.multi_user == true ? "multiuser" : "single"}"
   source_dir  = "${path.module}/${local.source_root}"
-  files_base64sha256 = base64encode(sha256(join("", [
+  # The runtime is part of the hash so a runtime change re-uploads a package built for that runtime.
+  files_base64sha256 = base64encode(sha256(join("", concat([local.lambda_runtime], [
     for item in fileset(path.module, "${local.source_root}/**/*") : filesha256(item)
-  ])))
-  archive_file_name = "/tmp/lambda_rotation.zip"
+  ]))))
+  # Per-instance archive under the root module's .terraform directory instead of the world-writable /tmp,
+  # so parallel units never overwrite each other's package. The hash keeps org-derived names out of the path.
+  archive_file_name = "${path.root}/.terraform/lambda-build/${substr(sha256(local.function_name), 0, 16)}.zip"
 }
 
 moved {
@@ -62,21 +70,27 @@ resource "terraform_data" "function_pip" {
     always_run = tostring(timestamp())
   }
   input = local.files_base64sha256
+  # Variable values reach the shell only through quoted environment variables, never by interpolation.
+  # Package specs and platform tags are module-owned constants.
   provisioner "local-exec" {
     working_dir = path.module
-    command     = "pip3 install --platform manylinux2014_x86_64 --target ${local.source_dir} --python-version 3.12 --implementation cp --only-binary=:all: --upgrade ${local.pip_map[var.settings.type]} "
+    command     = "pip3 install ${join(" ", [for platform in local.pip_platforms : "--platform ${platform}"])} --target \"$TARGET_DIR\" --python-version \"$PYTHON_VERSION\" --implementation cp --only-binary=:all: --upgrade ${local.pip_map[var.settings.type]}"
+    environment = {
+      TARGET_DIR     = local.source_dir
+      PYTHON_VERSION = local.python_version
+    }
   }
 }
 
 resource "terraform_data" "function_golang" {
-  count = local.pip_map[var.settings.type] == "[golang]" ? 1 : 0
+  count = local.golang_build ? 1 : 0
   triggers_replace = {
     always_run = tostring(timestamp())
   }
   input = local.files_base64sha256
   provisioner "local-exec" {
     working_dir = "${local.source_dir}/"
-    command     = "GOOS=linux GOARCH=amd64 go build -ldflags \"-s -w\" -o bootstrap"
+    command     = "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags lambda.norpc -ldflags \"-s -w\" -o bootstrap"
   }
   provisioner "local-exec" {
     working_dir = "${local.source_dir}/"
@@ -90,11 +104,17 @@ resource "terraform_data" "archive_file" {
   }
   input = local.files_base64sha256
   provisioner "local-exec" {
-    command = "[ -f ${local.archive_file_name} ] && rm -f ${local.archive_file_name} || echo 'No existing archive to remove, sikipping...'"
+    command = "mkdir -p \"$(dirname \"$ARCHIVE_FILE\")\" && rm -f \"$ARCHIVE_FILE\""
+    environment = {
+      ARCHIVE_FILE = abspath(local.archive_file_name)
+    }
   }
   provisioner "local-exec" {
     working_dir = local.source_dir
-    command     = "zip -r ${local.archive_file_name} ."
+    command     = "zip -r \"$ARCHIVE_FILE\" ."
+    environment = {
+      ARCHIVE_FILE = abspath(local.archive_file_name)
+    }
   }
   depends_on = [terraform_data.function_pip, terraform_data.function_golang]
 }
@@ -103,8 +123,8 @@ resource "aws_lambda_function" "this" {
   function_name    = local.function_name
   description      = try(var.settings.description, "Secret Rotation Lambda - ${var.settings.type} - MultiUser: ${local.multi_user == true ? "Yes" : "No"}")
   role             = aws_iam_role.default_lambda_function.arn
-  handler          = var.settings.type == "mongodbatlas" ? "bootstrap" : "lambda_function.lambda_handler"
-  runtime          = var.settings.type == "mongodbatlas" ? "provided.al2023" : "python3.12"
+  handler          = local.golang_build ? "bootstrap" : "lambda_function.lambda_handler"
+  runtime          = local.lambda_runtime
   package_type     = "Zip"
   filename         = local.archive_file_name
   source_code_hash = local.files_base64sha256
@@ -112,6 +132,10 @@ resource "aws_lambda_function" "this" {
   timeout          = try(var.settings.timeout, 60)
   publish          = true
   lifecycle {
+    precondition {
+      condition     = local.golang_build || length(fileset(path.module, "${local.source_root}/lambda_function.py")) > 0
+      error_message = "No bundled Lambda source exists for this settings.type / settings.multi_user combination (${local.source_root})."
+    }
     precondition {
       condition     = !local.api_key_rotation || !local.multi_user
       error_message = "API key rotation supports only the single-user strategy; set settings.multi_user to false."
